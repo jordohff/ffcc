@@ -59,7 +59,12 @@ def load_raw():
     sleeper_players = pd.read_parquet(RAW_DIR / "sleeper_players.parquet")
     injuries = pd.read_parquet(RAW_DIR / "injuries.parquet")
     schedules = pd.read_parquet(RAW_DIR / "schedules.parquet")
-    return weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart, sleeper_players, injuries, schedules
+    snap_share = pd.read_parquet(RAW_DIR / "snap_share.parquet")
+    contract_history = pd.read_parquet(RAW_DIR / "contract_history.parquet")
+    return (
+        weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart,
+        sleeper_players, injuries, schedules, snap_share, contract_history,
+    )
 
 
 def backtest(training_table: pd.DataFrame, test_season: int, top_n: int) -> None:
@@ -103,14 +108,19 @@ def main() -> None:
     parser.add_argument("--flex-slots", type=int, default=1)
     args = parser.parse_args()
 
-    weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart, sleeper_players, injuries, schedules = load_raw()
+    (
+        weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart,
+        sleeper_players, injuries, schedules, snap_share, contract_history,
+    ) = load_raw()
 
     print("Building season-level stats...")
     routes = compute_routes_run(pbp, participation, weekly)
     enriched = build_enriched_weekly(weekly, routes, ngs, scoring=args.scoring)
     season_stats = aggregate_season_stats(enriched)
     healthy_season_stats = aggregate_healthy_season_stats(enriched, injuries)
-    training_table = build_season_training_table(season_stats, rosters, schedules, healthy_season_stats)
+    training_table = build_season_training_table(
+        season_stats, rosters, schedules, snap_share, contract_history, healthy_season_stats
+    )
 
     print()
     backtest(training_table, args.backtest_season, args.top_n)
@@ -118,13 +128,16 @@ def main() -> None:
     print()
     print(f"Fitting final veteran model on all seasons through {args.draft_season - 1}...")
     models = fit_vet_models_by_position(training_table)
-    vet_board = build_prediction_features(season_stats, args.draft_season, rosters, schedules, healthy_season_stats)
+    vet_board = build_prediction_features(
+        season_stats, args.draft_season, rosters, schedules, snap_share, contract_history, healthy_season_stats
+    )
     vet_board["ppg_pred"] = predict_vet_ppg(models, vet_board)
     vet_board["games_est"] = estimate_games_played(vet_board["wavg_games_played"])
     vet_board["total_points_pred"] = vet_board["ppg_pred"] * vet_board["games_est"]
     vet_board = vet_board[
         ["player_id", "player_display_name", "position", "team", "age", "team_changed",
-         "new_head_coach", "new_hc_prior_team_ppg", "ppg_pred", "games_est", "total_points_pred"]
+         "new_head_coach", "new_hc_prior_team_ppg", "prev_snap_share_trend", "prev_snap_share_level",
+         "cap_percent", "ppg_pred", "games_est", "total_points_pred"]
     ]
     vet_board["is_rookie"] = 0
     print(f"  {len(vet_board):,} returning players projected")
@@ -143,10 +156,17 @@ def main() -> None:
     # computed.
     rookie_board["new_head_coach"] = 0
     rookie_board["new_hc_prior_team_ppg"] = 0
+    # No prior-season snap data exists for a true rookie either.
+    rookie_board["prev_snap_share_trend"] = pd.NA
+    rookie_board["prev_snap_share_level"] = pd.NA
+    # Rookie contracts are small/not yet in the contract data source - 0 is
+    # a reasonable placeholder (no established veteran-scale investment yet).
+    rookie_board["cap_percent"] = 0
     rookie_board["is_rookie"] = 1
     rookie_board = rookie_board[
         ["player_id", "player_display_name", "position", "team", "age", "team_changed",
-         "new_head_coach", "new_hc_prior_team_ppg", "ppg_pred", "games_est", "total_points_pred", "is_rookie"]
+         "new_head_coach", "new_hc_prior_team_ppg", "prev_snap_share_trend", "prev_snap_share_level",
+         "cap_percent", "ppg_pred", "games_est", "total_points_pred", "is_rookie"]
     ]
     print(f"  {len(rookie_board):,} rookies projected")
 

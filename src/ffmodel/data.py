@@ -172,6 +172,59 @@ def load_current_depth_chart(season: int) -> pd.DataFrame:
     return dc[dc["dt"] == latest].reset_index(drop=True)
 
 
+def load_snap_share(seasons: list[int]) -> pd.DataFrame:
+    """Pull weekly offensive snap share (percent of team's offensive snaps
+    played) for the given seasons.
+
+    load_snap_counts() only has PFR-style player IDs (e.g. "WillKy00"), not
+    the gsis_id used everywhere else in this pipeline, so this crosswalks
+    through load_players()' pfr_id<->gsis_id mapping - verified a 99.8%
+    match rate for QB/RB/WR/TE rows before relying on this. Available from
+    2012 onward. Includes both REG and POST season_type rows (game_type
+    column) - callers that care about the regular-season-only distinction
+    (see aggregate_season_stats) need to filter it themselves.
+    """
+    import nflreadpy as nfl
+
+    snaps = nfl.load_snap_counts(seasons).select(
+        ["season", "week", "game_type", "pfr_player_id", "team", "position", "offense_snaps", "offense_pct"]
+    )
+    crosswalk = nfl.load_players().select(["gsis_id", "pfr_id"]).drop_nulls("pfr_id")
+    merged = snaps.join(crosswalk, left_on="pfr_player_id", right_on="pfr_id", how="inner")
+    df = merged.to_pandas().rename(columns={"gsis_id": "player_id"}).drop(columns=["pfr_player_id"])
+    return df
+
+
+def load_contract_history() -> pd.DataFrame:
+    """Pull each active/historical contract's year-by-year cap details
+    (`season_history` - a nested per-year breakdown including `cap_percent`,
+    that specific year's cap hit as a share of the total cap, already
+    comparable across seasons without further normalization) and flatten it
+    into one row per player per year.
+
+    Not season-parameterized like other load_ functions here - this is a
+    full-history pull (OverTheCap-sourced via nflreadpy), covering a
+    player's whole known contract history in one call.
+    """
+    import nflreadpy as nfl
+
+    contracts = nfl.load_contracts().select(["gsis_id", "season_history"]).to_pandas()
+    contracts = contracts.dropna(subset=["gsis_id", "season_history"])
+    exploded = contracts.explode("season_history").dropna(subset=["season_history"])
+    detail = pd.json_normalize(exploded["season_history"])
+    detail["player_id"] = exploded["gsis_id"].to_numpy()
+    detail = detail.dropna(subset=["year", "cap_percent"])
+    detail["season"] = detail["year"].astype(int)
+    # A handful of years have multiple near-identical entries per player
+    # (restructures/renegotiations tagged separately in the source) -
+    # collapse to one row per player per year.
+    return (
+        detail.groupby(["player_id", "season"])["cap_percent"]
+        .mean()
+        .reset_index()
+    )
+
+
 def fetch_sleeper_players() -> pd.DataFrame:
     """Pull the full Sleeper NFL player list (~11,000 players, a few MB).
 

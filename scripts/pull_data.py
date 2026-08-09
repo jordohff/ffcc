@@ -13,6 +13,7 @@ import pandas as pd
 
 from ffmodel.data import (
     fetch_sleeper_players,
+    load_contract_history,
     load_current_depth_chart,
     load_draft_pick_capital,
     load_injury_reports,
@@ -21,6 +22,7 @@ from ffmodel.data import (
     load_pbp_dropbacks,
     load_roster_info,
     load_schedules,
+    load_snap_share,
     load_weekly_stats,
 )
 
@@ -28,6 +30,9 @@ RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
 
 # Next Gen Stats and play-by-play participation charting only exist from 2016 on.
 NGS_MIN_SEASON = 2016
+
+# Snap count charting only exists from 2012 on.
+SNAP_COUNTS_MIN_SEASON = 2012
 
 
 def _pull_and_cache(filename: str, label: str, fetch, force: bool) -> None:
@@ -135,6 +140,23 @@ def main() -> None:
         "current_depth_chart.parquet",
         f"current ({args.current_season}) depth chart",
         lambda: load_current_depth_chart(args.current_season),
+        args.force,
+    )
+
+    snap_seasons = [s for s in args.seasons if s >= SNAP_COUNTS_MIN_SEASON]
+    if not snap_seasons:
+        print(f"  no requested seasons are >= {SNAP_COUNTS_MIN_SEASON}, skipping snap share pull")
+    else:
+        _pull_and_cache(
+            "snap_share.parquet",
+            f"weekly snap share for seasons {snap_seasons}",
+            lambda: load_snap_share(snap_seasons),
+            args.force,
+        )
+    _pull_and_cache(
+        "contract_history.parquet",
+        "contract history (year-by-year cap details, full career)",
+        load_contract_history,
         args.force,
     )
 

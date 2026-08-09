@@ -615,3 +615,60 @@ researched each offseason (the loader in `build_draft_rankings.py` looks for
 forgetting to update it fails soft, not hard). As more seasons accumulate, this could eventually become
 a real trained feature the way `new_head_coach` already is - not there yet with just one year of data.
 
+
+
+### 2026-08-09 â€” snap-share trend and contract/investment signal
+
+User asked to dig into in-season snap-share trajectory (not just season totals), using Kyren
+Williams/Blake Corum's 2025 LA Rams backfield as an explicit test case, plus a "pay signal" for
+role security (Courtland Sutton as the example), and to verify two specific offseason moves
+(Montgomery traded to Houston/replaced by Pacheco; Gibbs' new contract).
+
+**Verified all cited facts before building anything**: confirmed via web search that Detroit traded
+David Montgomery to Houston (for OL Juice Scruggs + 2026 4th/2027 7th) and signed Isiah Pacheco to a
+modest 1-year, $1.81M "prove it" deal as the replacement - exactly as described, and a great combined
+test case since it pairs a real snap-competition scenario with a real contract-investment disparity.
+
+**New data pulled**: `load_snap_share` (weekly offensive snap %, 2012+) - required a crosswalk since
+`load_snap_counts()` only has PFR-style IDs, not gsis_id; verified a 99.8% match rate via
+`load_players()`'s pfr_id<->gsis_id mapping before relying on it. `load_contract_history` - explodes
+`load_contracts()`'s nested `season_history` field into one row per player per year with `cap_percent`
+(that year's actual cap hit as a share of the total cap - already comparable across seasons, and
+reflects real contract structuring like backloaded cap hits, not just the announced deal terms).
+
+**Snap-share trend** (`compute_snap_share_trend`): first-half (weeks 1-9) vs second-half (weeks 10-18)
+average offense_pct, REG season only. Validated directly against the user's test case before wiring
+into the model: Kyren Williams 74.6% -> 63.9% (trend -10.5pp), Blake Corum 24.3% -> 33.4% (trend
++9.2pp) - confirms the user's observation was real, not just a vibe. Added `prev_snap_share_trend` and
+`prev_snap_share_level` (single most-recent-season lookback, not blended - in-season momentum is
+inherently a recent-trajectory signal) to `SKILL_VET_FEATURES` (RB/WR/TE). RB backtest improved
+(Spearman 0.768 -> 0.772). Final 2026 board correctly shows Kyren at -0.105 trend / Corum at +0.092 -
+Kyren still comfortably RB6 (VBD 88.68) since his snap floor is still clearly majority-share even
+after the decline, Corum still well below replacement (VBD -39.96) since even a growing role tops out
+around 33% - the model captures the DIRECTION correctly without overreacting to a committee back who's
+still clearly the backup.
+
+**Contract/investment signal** (`add_contract_signal_features`): `cap_percent` for the season being
+predicted. **Found and fixed a real design error before it shipped wrong**: initially built this the
+same lagged way as touches/games_played (`prev_` style, season-1 lookback) - but caught it immediately
+when Jahmyr Gibbs' newly-signed record RB contract showed only 0.02 (his OLD rookie-scale cap hit),
+since the lookup was grabbing 2025's contract to predict 2026, one year stale. Contracts are
+fundamentally different from performance stats: a contract is signed BEFORE the season and is fully
+known at prediction time (same as current team or a new head coach), not something that only exists
+after the season is played - lagging it was backwards. Fixed to look up the CONTEMPORANEOUS season
+(target season itself, not target season - 1). Verified: Courtland Sutton correctly shows 0.05 (his
+real 2025 cap_percent from `load_contracts`), Gibbs correctly shows 0.018 for 2026 - still modest
+DESPITE the record contract, because big NFL deals are typically back-loaded for cap management (his
+own contract's `season_history` shows 2026 at 0.018 ramping to 0.044 by 2027) - a real, honest
+structural fact, not a bug. Pacheco and Montgomery (post-trade, contract unchanged) both correctly show
+~0.01, consistent with their low-investment/replaceable framing. Added as `cap_percent` in
+`COMMON_VET_FEATURES` (applies to all positions, matching the Sutton/WR framing). QB backtest improved
+most (Spearman 0.731 -> 0.736) - plausibly because QB1 job security/investment is an especially clean,
+strong signal (backup QBs rarely get real snaps regardless of recent form, so "is this guy actually the
+guy" matters a lot).
+
+**Lesson worth keeping in mind for future single-season-lookback features**: not everything that looks
+like a "prev_" feature actually IS one - the test is whether the underlying fact only becomes knowable
+AFTER the season (performance stats: lag it) or is already decided BEFORE the season starts (contracts,
+coaching, current roster: don't lag it, use the target season itself).
+

@@ -68,6 +68,7 @@ COMMON_VET_FEATURES = [
     "team_changed",
     "new_head_coach",
     "new_hc_prior_team_ppg",
+    "cap_percent",
 ]
 
 SKILL_VET_FEATURES = COMMON_VET_FEATURES + [
@@ -84,6 +85,8 @@ SKILL_VET_FEATURES = COMMON_VET_FEATURES + [
     "vacated_targets_pg",
     "vacated_carries_pg",
     "vacated_routes_run_pg",
+    "prev_snap_share_trend",
+    "prev_snap_share_level",
 ]
 
 QB_VET_FEATURES = COMMON_VET_FEATURES + [
@@ -319,6 +322,79 @@ def add_touch_volume_features(table: pd.DataFrame) -> pd.DataFrame:
     table = table.copy()
     for hinge in TOUCH_VOLUME_HINGES:
         table[f"touches_over_{hinge}"] = (table["prev_touches"] - hinge).clip(lower=0)
+    return table
+
+
+# Week to split the regular season into "first half" vs "second half" for
+# snap-share trend purposes. 9 splits an 18-week season roughly evenly.
+SNAP_SHARE_TREND_SPLIT_WEEK = 9
+
+
+def compute_snap_share_trend(
+    snap_share: pd.DataFrame, first_half_max_week: int = SNAP_SHARE_TREND_SPLIT_WEEK
+) -> pd.DataFrame:
+    """For every player-season, compute the trailing in-season TREND in
+    offensive snap share: second-half average offense_pct minus first-half
+    average. Positive means a player's role was GROWING as the season
+    progressed (gaining trust, a committee-mate declining); negative means
+    it was SHRINKING - signal a single season-long average can't see, since
+    that treats week 1 and week 18 identically.
+
+    Also returns `snap_share_second_half` (the level itself, not just the
+    trend) - a shrinking-but-still-dominant role reads very differently from
+    a shrinking-and-now-shared one, and the trend alone can't distinguish
+    them.
+
+    REG season only (`game_type == "REG"` in snap_share).
+    """
+    reg = snap_share[snap_share["game_type"] == "REG"]
+    first = reg[reg["week"] <= first_half_max_week].groupby(["player_id", "season"])["offense_pct"].mean()
+    second = reg[reg["week"] > first_half_max_week].groupby(["player_id", "season"])["offense_pct"].mean()
+    trend = (second - first).rename("snap_share_trend")
+    result = pd.concat([trend, second.rename("snap_share_second_half")], axis=1).reset_index()
+    return result
+
+
+def add_snap_share_trend_features(table: pd.DataFrame, snap_share_trend: pd.DataFrame) -> pd.DataFrame:
+    """Add `prev_snap_share_trend`/`prev_snap_share_level` from the single
+    most recent season (NOT blended across years, like prev_touches -
+    in-season momentum is inherently a recent-trajectory signal, not
+    something to average with two-year-old trends).
+    """
+    prior = snap_share_trend.rename(
+        columns={"snap_share_trend": "prev_snap_share_trend", "snap_share_second_half": "prev_snap_share_level"}
+    )
+    prior = prior.assign(season=prior["season"] + 1)
+    table = table.merge(prior, on=["player_id", "season"], how="left")
+    return table
+
+
+def add_contract_signal_features(table: pd.DataFrame, contract_history: pd.DataFrame) -> pd.DataFrame:
+    """Add `cap_percent`: the player's cap hit (as a share of that year's
+    total cap - already comparable across seasons, see
+    data.load_contract_history) for the season BEING PREDICTED itself - NOT
+    lagged by a season the way performance stats are.
+
+    This is deliberately NOT a `prev_` single-season-lookback feature like
+    touches/games_played/snap_share_trend, even though it looks similar.
+    Those are lagged because they only EXIST after a season is played - you
+    can't know a player's 2026 touches until 2026 happens. A contract is the
+    opposite: it's signed BEFORE the season starts and is fully known
+    information at prediction time, same as current team or a new head
+    coach. Lagging it by a season would mean a player who just got a huge
+    new deal this offseason (e.g. a rookie-scale player extended into a
+    market-setting contract) shows their OLD, much smaller cap hit instead
+    of the new one - exactly backwards for what this feature is trying to
+    capture ("how much has the team invested in this player RIGHT NOW").
+
+    This is a "how much has this team invested in / committed to this
+    player" signal, distinct from recent performance - a big, guaranteed
+    contract reflects the team's own belief in a player's role security
+    (and gives them less incentive to bench/replace him), which can matter
+    independent of last season's raw stat line.
+    """
+    table = table.merge(contract_history, on=["player_id", "season"], how="left")
+    table["cap_percent"] = table["cap_percent"].fillna(0)
     return table
 
 
@@ -632,6 +708,8 @@ def build_season_training_table(
     season_stats: pd.DataFrame,
     rosters: pd.DataFrame,
     schedules: pd.DataFrame,
+    snap_share: pd.DataFrame,
+    contract_history: pd.DataFrame,
     healthy_season_stats: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build the veteran training table: for each player-season Y where we
@@ -665,6 +743,8 @@ def build_season_training_table(
     coach_history = build_head_coach_history(schedules)
     team_output = compute_team_offensive_output(season_stats, rosters)
     table = add_head_coach_features(table, coach_history, team_output)
+    table = add_snap_share_trend_features(table, compute_snap_share_trend(snap_share))
+    table = add_contract_signal_features(table, contract_history)
     return table
 
 
@@ -673,6 +753,8 @@ def build_prediction_features(
     target_season: int,
     rosters: pd.DataFrame,
     schedules: pd.DataFrame,
+    snap_share: pd.DataFrame,
+    contract_history: pd.DataFrame,
     healthy_season_stats: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build feature rows for predicting `target_season`, which hasn't been
@@ -701,6 +783,8 @@ def build_prediction_features(
     coach_history = build_head_coach_history(schedules)
     team_output = compute_team_offensive_output(season_stats, rosters)
     table = add_head_coach_features(table, coach_history, team_output)
+    table = add_snap_share_trend_features(table, compute_snap_share_trend(snap_share))
+    table = add_contract_signal_features(table, contract_history)
     return table
 
 
