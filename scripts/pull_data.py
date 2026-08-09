@@ -3,15 +3,28 @@
 Usage:
     uv run scripts/pull_data.py
     uv run scripts/pull_data.py --seasons 2021 2022 2023 2024 2025
-    uv run scripts/pull_data.py --force
+    uv run scripts/pull_data.py --force   # re-fetch, e.g. after changing --seasons
 """
 
 import argparse
 from pathlib import Path
 
-from ffmodel.data import fetch_sleeper_players, load_schedules, load_weekly_stats
+import pandas as pd
+
+from ffmodel.data import fetch_sleeper_players, load_injury_reports, load_schedules, load_weekly_stats
 
 RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
+
+
+def _pull_and_cache(filename: str, label: str, fetch, force: bool) -> None:
+    path = RAW_DIR / filename
+    if force or not path.exists():
+        print(f"Pulling {label}...")
+        df: pd.DataFrame = fetch()
+        df.to_parquet(path, index=False)
+        print(f"  saved {len(df):,} rows -> {path}")
+    else:
+        print(f"  {path} already exists, skipping (use --force to re-fetch)")
 
 
 def main() -> None:
@@ -20,8 +33,8 @@ def main() -> None:
         "--seasons",
         type=int,
         nargs="+",
-        default=list(range(2021, 2026)),
-        help="Seasons to pull weekly stats for (default: 2021-2025)",
+        default=list(range(2010, 2026)),
+        help="Seasons to pull weekly stats for (default: 2010-2025)",
     )
     parser.add_argument(
         "--force",
@@ -32,32 +45,30 @@ def main() -> None:
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
-    weekly_path = RAW_DIR / "weekly_stats.parquet"
-    if args.force or not weekly_path.exists():
-        print(f"Pulling weekly player stats for seasons {args.seasons} from nflreadpy...")
-        weekly = load_weekly_stats(args.seasons)
-        weekly.to_parquet(weekly_path, index=False)
-        print(f"  saved {len(weekly):,} rows -> {weekly_path}")
-    else:
-        print(f"  {weekly_path} already exists, skipping (use --force to re-fetch)")
-
-    schedules_path = RAW_DIR / "schedules.parquet"
-    if args.force or not schedules_path.exists():
-        print(f"Pulling schedules for seasons {args.seasons} from nflreadpy...")
-        schedules = load_schedules(args.seasons)
-        schedules.to_parquet(schedules_path, index=False)
-        print(f"  saved {len(schedules):,} games -> {schedules_path}")
-    else:
-        print(f"  {schedules_path} already exists, skipping (use --force to re-fetch)")
-
-    players_path = RAW_DIR / "sleeper_players.parquet"
-    if args.force or not players_path.exists():
-        print("Pulling Sleeper player metadata...")
-        players = fetch_sleeper_players()
-        players.to_parquet(players_path, index=False)
-        print(f"  saved {len(players):,} players -> {players_path}")
-    else:
-        print(f"  {players_path} already exists, skipping (use --force to re-fetch)")
+    _pull_and_cache(
+        "weekly_stats.parquet",
+        f"weekly player stats for seasons {args.seasons}",
+        lambda: load_weekly_stats(args.seasons),
+        args.force,
+    )
+    _pull_and_cache(
+        "schedules.parquet",
+        f"schedules for seasons {args.seasons}",
+        lambda: load_schedules(args.seasons),
+        args.force,
+    )
+    _pull_and_cache(
+        "injuries.parquet",
+        f"injury reports for seasons {args.seasons}",
+        lambda: load_injury_reports(args.seasons),
+        args.force,
+    )
+    _pull_and_cache(
+        "sleeper_players.parquet",
+        "Sleeper player metadata",
+        fetch_sleeper_players,
+        args.force,
+    )
 
 
 if __name__ == "__main__":

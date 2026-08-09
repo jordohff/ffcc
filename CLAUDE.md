@@ -25,12 +25,16 @@ and should stay that way unless the user asks to go further.
   next-gen stats, etc. Pulled from the nflverse project. Returns **Polars** DataFrames by default
   (convert with `.to_pandas()` when we want pandas). This is the successor to `nfl_data_py`, which is
   no longer maintained — do not suggest `nfl_data_py`.
-- **Sleeper API** — used for player ID/metadata mapping and injury designations only
-  (`GET /v1/players/nfl`), via the officially documented endpoints at `https://api.sleeper.app/v1`.
-  Deliberately NOT using Sleeper's stats/projections endpoints (`api.sleeper.app/stats/...`) —
-  those are undocumented, unofficial, and could break without notice. If historical stats are ever
-  needed from Sleeper specifically, ask the user first since this is a deviation from the current plan.
-  No API key/auth needed for Sleeper.
+- **Sleeper API** — used for player ID/metadata mapping only (`GET /v1/players/nfl`), via the
+  officially documented endpoints at `https://api.sleeper.app/v1`. Deliberately NOT using Sleeper's
+  stats/projections endpoints (`api.sleeper.app/stats/...`) — those are undocumented, unofficial, and
+  could break without notice. If historical stats are ever needed from Sleeper specifically, ask the
+  user first since this is a deviation from the current plan. No API key/auth needed for Sleeper.
+  Note: Sleeper's `injury_status` field is a **live/current snapshot only**, not a historical time
+  series — it can't inform past weeks in a backtest. Historical injury status instead comes from
+  `nflreadpy`'s `load_injuries()` (weekly injury reports since 2009) — see the 2026-08-09 accuracy
+  iteration entry below. Sleeper's live status would still be the right source if/when we build a
+  forward-looking (next-week) projection tool.
 - If/when the user wants projections tailored to their own Sleeper league (roster settings, scoring
   format), we'll pull their league data too — not done yet as of project start.
 
@@ -108,3 +112,46 @@ writeup.
 Ideas not yet tried, in rough order of expected value: better matchup signal (pass-rate/game-script
 proxies, not just raw points allowed), injury status merged in from Sleeper, more seasons of history,
 QB-specific features (rushing floor, deep-ball rate) given QB is the weakest position currently.
+
+### 2026-08-09 — accuracy iteration, round 2
+
+Baseline going in: MAE 4.08, R² 0.404 (position-specific Ridge, 2021-2024 train / 2025 test). Did the
+four items listed above, in order, testing after each:
+
+1. **QB-specific features** (`avg_attempts`, `avg_passing_yards`, `avg_passing_tds`, `avg_passing_epa`
+   trailing averages; `POSITION_FEATURE_COLUMNS` in `features.py` now gives QB its own feature set
+   instead of reusing the RB/WR/TE receiving-volume features it never used). Small help: QB MAE
+   6.79 → 6.72, overall MAE 4.08 → 4.07, R² 0.404 → 0.407. Side benefit: switching to per-position
+   `dropna` (instead of dropping any row missing ANY position's features) recovered ~1,000 rows that
+   were being discarded for no good reason.
+2. **Implied team total as matchup signal** (`implied_team_total`, derived from schedules'
+   `spread_line`/`total_line`: `total/2 ± spread/2`). Verified the spread sign convention empirically
+   first (positive `spread_line` = home team favored — confirmed via
+   `corr(spread_line, home_score - away_score) = 0.45` before trusting it). Small help, mostly at
+   RB/TE: R² 0.407 → 0.409, TE R² 0.270 → 0.279, RB R² 0.401 → 0.404. Barely moved QB (makes sense —
+   team scoring total doesn't distinguish pass-heavy vs. run-heavy game script).
+3. **Historical injury status** (`injury_severity`, 0-3 ordinal, from `nflreadpy load_injuries()` —
+   NOT Sleeper, see note in Data Sources above — using the final pre-game report per player per week).
+   Verified the merge actually populated data (210/6,172 test rows flagged, all "Questionable" — Out/
+   Doubtful players mostly don't have a stat line to predict in the first place, since they didn't
+   play). Genuine null result: no measurable accuracy change. Plausible reason: a nagging injury's
+   effect on usage is likely already captured by the trailing performance averages. Kept in the
+   pipeline (free, might matter more in other seasons) but isn't pulling weight.
+4. **More historical seasons** (2021-2025 → 2010-2025, 24K → 86K training rows). Also essentially flat
+   for Ridge (R² 0.409 → 0.410) — a simple linear model with ~10-15 features per position was already
+   saturated at 5 seasons of data; more history didn't add signal it could use (and may include
+   offset from older-era rule/scheme differences the model has no way to account for). BUT this
+   changed the GBM comparison: with more data, `HistGradientBoostingRegressor` closed the gap with
+   Ridge (overall R² 0.411, essentially tied) and pulled ahead specifically at QB (MAE 6.57 vs Ridge's
+   6.70) and TE, while Ridge stayed slightly better at WR. GBM is now a legitimate option, particularly
+   if QB accuracy matters most, but the margin is small — **Ridge stays the default** for simplicity
+   and interpretability. A natural next step if pursued further: use GBM for QB only, Ridge elsewhere.
+
+Net result of this round: MAE 4.08 → 4.08 (flat), R² 0.404 → 0.410-0.411 depending on model. Real but
+modest gains, concentrated in QB features and the matchup signal; two of the four tried ideas
+(injury status, more seasons for Ridge) were legitimate misses. This suggests we're approaching the
+practical ceiling for this feature set/model family — weekly fantasy football has a lot of true
+in-game randomness (garbage time, injuries during the game, game-flow swings) no pre-game feature set
+captures. Bigger future gains likely need either materially different signal (e.g. snap counts/routes
+run, Next Gen Stats separation/pressure metrics, defense-specific personnel tendencies) rather than
+more of the same feature family.

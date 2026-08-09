@@ -52,15 +52,17 @@ def main() -> None:
 
     weekly_path = RAW_DIR / "weekly_stats.parquet"
     schedules_path = RAW_DIR / "schedules.parquet"
-    if not weekly_path.exists() or not schedules_path.exists():
+    injuries_path = RAW_DIR / "injuries.parquet"
+    if not weekly_path.exists() or not schedules_path.exists() or not injuries_path.exists():
         raise SystemExit(f"Raw data not found in {RAW_DIR} - run `uv run scripts/pull_data.py` first.")
 
     raw = pd.read_parquet(weekly_path)
     schedules = pd.read_parquet(schedules_path)
+    injuries = pd.read_parquet(injuries_path)
     test_season = args.test_season or int(raw["season"].max())
 
     print(f"Building features (scoring={args.scoring})...")
-    featured = build_features(raw, schedules, scoring=args.scoring)
+    featured = build_features(raw, schedules, injuries, scoring=args.scoring)
 
     train, test = train_test_split_by_season(featured, test_season=test_season)
     print(

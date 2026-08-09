@@ -7,7 +7,7 @@ from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.pipeline import Pipeline
 
-from ffmodel.features import FEATURE_COLUMNS
+from ffmodel.features import POSITION_FEATURE_COLUMNS
 
 
 def make_pipeline(kind: str = "ridge") -> Pipeline:
@@ -34,58 +34,59 @@ def train_test_split_by_season(
     on data from before the games we're evaluating on, which mirrors how the
     model would actually be used (predicting future weeks from past ones).
 
-    Rows with missing features (a player's first few tracked games, with no
-    prior history to average) are dropped, since the model has nothing to
-    learn from or predict on for those rows.
+    Doesn't drop NaN feature rows here, since QB and skill-position models use
+    different feature columns (see POSITION_FEATURE_COLUMNS) - that filtering
+    happens per-position in fit_and_evaluate_by_position instead.
     """
-    train = df[df["season"] < test_season].dropna(subset=FEATURE_COLUMNS)
-    test = df[df["season"] == test_season].dropna(subset=FEATURE_COLUMNS)
+    train = df[df["season"] < test_season]
+    test = df[df["season"] == test_season]
     return train, test
 
 
 def fit_and_evaluate_by_position(
     train: pd.DataFrame, test: pd.DataFrame, kind: str = "ridge"
 ) -> tuple[dict[str, Pipeline], pd.DataFrame]:
-    """Fit one model per position (QB/RB/WR/TE) instead of a single shared model.
+    """Fit one model per position (QB/RB/WR/TE), each on its own feature set.
 
     Fantasy scoring is driven by different things per position - a QB's points
     come mostly from passing yards/TDs, a WR's from targets/air yards - so
-    letting each position have its own coefficients fits noticeably better
-    than forcing one model to average across all of them.
+    each position gets its own feature columns (POSITION_FEATURE_COLUMNS) and
+    its own model coefficients rather than sharing one generic feature set.
+
+    Rows with missing features for that position (a player's first few
+    tracked games, with no prior history to average) are dropped - the model
+    has nothing to learn from or predict on for those rows.
 
     Prints accuracy per position plus an overall number, and returns the
-    dict of fitted models (one per position) plus `test` with predictions
-    filled in.
+    dict of fitted models (one per position) plus a combined dataframe of all
+    test rows that got a prediction, with the new `projected_points` column.
     """
     models: dict[str, Pipeline] = {}
-    test = test.copy()
-    test["projected_points"] = float("nan")
+    predictions = []
 
     for position in sorted(train["position"].unique()):
-        pos_train = train[train["position"] == position]
-        pos_test_mask = test["position"] == position
-        if pos_test_mask.sum() == 0:
+        feature_cols = POSITION_FEATURE_COLUMNS.get(position)
+        if feature_cols is None:
+            continue
+
+        pos_train = train[train["position"] == position].dropna(subset=feature_cols)
+        pos_test = test[test["position"] == position].dropna(subset=feature_cols).copy()
+        if pos_train.empty or pos_test.empty:
             continue
 
         pipeline = make_pipeline(kind=kind)
-        pipeline.fit(pos_train[FEATURE_COLUMNS], pos_train["fantasy_points_target"])
-        test.loc[pos_test_mask, "projected_points"] = pipeline.predict(
-            test.loc[pos_test_mask, FEATURE_COLUMNS]
-        )
+        pipeline.fit(pos_train[feature_cols], pos_train["fantasy_points_target"])
+        pos_test["projected_points"] = pipeline.predict(pos_test[feature_cols])
         models[position] = pipeline
 
-        pos_mae = mean_absolute_error(
-            test.loc[pos_test_mask, "fantasy_points_target"],
-            test.loc[pos_test_mask, "projected_points"],
-        )
-        pos_r2 = r2_score(
-            test.loc[pos_test_mask, "fantasy_points_target"],
-            test.loc[pos_test_mask, "projected_points"],
-        )
-        print(f"  {position}: MAE {pos_mae:.2f}, R^2 {pos_r2:.3f} (n={pos_test_mask.sum():,})")
+        pos_mae = mean_absolute_error(pos_test["fantasy_points_target"], pos_test["projected_points"])
+        pos_r2 = r2_score(pos_test["fantasy_points_target"], pos_test["projected_points"])
+        print(f"  {position}: MAE {pos_mae:.2f}, R^2 {pos_r2:.3f} (n={len(pos_test):,})")
+        predictions.append(pos_test)
 
-    overall_mae = mean_absolute_error(test["fantasy_points_target"], test["projected_points"])
-    overall_r2 = r2_score(test["fantasy_points_target"], test["projected_points"])
+    all_predictions = pd.concat(predictions)
+    overall_mae = mean_absolute_error(all_predictions["fantasy_points_target"], all_predictions["projected_points"])
+    overall_r2 = r2_score(all_predictions["fantasy_points_target"], all_predictions["projected_points"])
     print(f"Overall: MAE {overall_mae:.2f}, R^2 {overall_r2:.3f}")
 
-    return models, test
+    return models, all_predictions

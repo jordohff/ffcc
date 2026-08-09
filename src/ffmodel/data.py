@@ -1,7 +1,11 @@
 """Functions for pulling raw data from nflreadpy and the Sleeper API.
 
-nflreadpy is the source of truth for historical stats. Sleeper is used only for
-player ID/metadata (name, position, injury status) - see CLAUDE.md for why.
+nflreadpy is the source of truth for historical stats, including historical
+weekly injury reports (load_injuries). Sleeper is used only for player
+ID/metadata - see CLAUDE.md for why. Sleeper's own injury_status field is a
+live/current snapshot, not a historical time series, so it can't be used to
+inform past weeks in a backtest (nflreadpy's load_injuries is what's used
+for that instead - see add_injury_features in features.py).
 """
 
 import pandas as pd
@@ -40,6 +44,19 @@ def load_schedules(seasons: list[int]) -> pd.DataFrame:
 
     schedules = nfl.load_schedules(seasons)
     return schedules.to_pandas()
+
+
+def load_injury_reports(seasons: list[int]) -> pd.DataFrame:
+    """Pull historical weekly injury reports for the given seasons.
+
+    One row per player per team-report update: their official pre-game injury
+    designation (Questionable/Doubtful/Out) for that week, identified by
+    `gsis_id` - the same player ID system used in load_weekly_stats/player_id.
+    """
+    import nflreadpy as nfl
+
+    injuries = nfl.load_injuries(seasons)
+    return injuries.to_pandas()
 
 
 def fetch_sleeper_players() -> pd.DataFrame:
