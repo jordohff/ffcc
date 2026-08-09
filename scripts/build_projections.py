@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ffmodel.features import FEATURE_COLUMNS, build_features
+from ffmodel.features import FEATURE_COLUMNS, build_features, compute_routes_run
 from ffmodel.model import fit_and_evaluate_by_position, train_test_split_by_season
 
 RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
@@ -50,19 +50,29 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    weekly_path = RAW_DIR / "weekly_stats.parquet"
-    schedules_path = RAW_DIR / "schedules.parquet"
-    injuries_path = RAW_DIR / "injuries.parquet"
-    if not weekly_path.exists() or not schedules_path.exists() or not injuries_path.exists():
-        raise SystemExit(f"Raw data not found in {RAW_DIR} - run `uv run scripts/pull_data.py` first.")
+    required_files = [
+        "weekly_stats.parquet",
+        "schedules.parquet",
+        "injuries.parquet",
+        "pbp_dropbacks.parquet",
+        "participation.parquet",
+        "nextgen_receiving.parquet",
+    ]
+    missing = [f for f in required_files if not (RAW_DIR / f).exists()]
+    if missing:
+        raise SystemExit(f"Missing {missing} in {RAW_DIR} - run `uv run scripts/pull_data.py` first.")
 
-    raw = pd.read_parquet(weekly_path)
-    schedules = pd.read_parquet(schedules_path)
-    injuries = pd.read_parquet(injuries_path)
+    raw = pd.read_parquet(RAW_DIR / "weekly_stats.parquet")
+    schedules = pd.read_parquet(RAW_DIR / "schedules.parquet")
+    injuries = pd.read_parquet(RAW_DIR / "injuries.parquet")
+    pbp_dropbacks = pd.read_parquet(RAW_DIR / "pbp_dropbacks.parquet")
+    participation = pd.read_parquet(RAW_DIR / "participation.parquet")
+    ngs_receiving = pd.read_parquet(RAW_DIR / "nextgen_receiving.parquet")
     test_season = args.test_season or int(raw["season"].max())
 
     print(f"Building features (scoring={args.scoring})...")
-    featured = build_features(raw, schedules, injuries, scoring=args.scoring)
+    routes = compute_routes_run(pbp_dropbacks, participation, raw)
+    featured = build_features(raw, schedules, injuries, routes, ngs_receiving, scoring=args.scoring)
 
     train, test = train_test_split_by_season(featured, test_season=test_season)
     print(

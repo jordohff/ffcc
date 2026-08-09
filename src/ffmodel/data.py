@@ -59,6 +59,57 @@ def load_injury_reports(seasons: list[int]) -> pd.DataFrame:
     return injuries.to_pandas()
 
 
+def load_pbp_dropbacks(seasons: list[int]) -> pd.DataFrame:
+    """Pull just enough play-by-play data to identify pass dropbacks.
+
+    The full nflverse play-by-play file has 300+ columns; we only need a
+    handful to flag which plays were a QB dropback (attempt, sack, or
+    scramble - any play where a receiver would have run a route), so we
+    select those columns down immediately rather than caching the full file.
+    """
+    import nflreadpy as nfl
+
+    pbp = nfl.load_pbp(seasons).select(["game_id", "play_id", "season", "week", "qb_dropback"])
+    return pbp.to_pandas()
+
+
+def load_participation(seasons: list[int]) -> pd.DataFrame:
+    """Pull play-level participation data: which offensive players (by
+    gsis_id) were on the field for each play.
+
+    Only pulls the columns needed to estimate routes run (see
+    features.compute_routes_run) - the full participation file also has
+    personnel groupings and pass-rush/coverage charting we're not using yet.
+    Available from 2016 onward.
+
+    Note: participation also has an `offense_positions` column that looks
+    like the obvious way to filter to WR/RB/TE, but it's only populated from
+    2023 onward (100% null before that) - so we deliberately don't pull it,
+    and instead tag each player's position using our own weekly_stats data,
+    which has full coverage back to 2016 (see compute_routes_run).
+    """
+    import nflreadpy as nfl
+
+    participation = nfl.load_participation(seasons).select(
+        ["nflverse_game_id", "play_id", "offense_players"]
+    )
+    return participation.to_pandas()
+
+
+def load_nextgen_receiving(seasons: list[int]) -> pd.DataFrame:
+    """Pull weekly Next Gen Stats receiving metrics: average separation from
+    the nearest defender, average cushion at the snap, share of the team's
+    intended air yards, and yards-after-catch over expectation.
+
+    Available from 2016 onward. Excludes the season-total rows nflreadpy
+    includes at week=0 - we only want the per-week rows.
+    """
+    import nflreadpy as nfl
+
+    ngs = nfl.load_nextgen_stats(seasons, stat_type="receiving").to_pandas()
+    return ngs[ngs["week"] > 0].reset_index(drop=True)
+
+
 def fetch_sleeper_players() -> pd.DataFrame:
     """Pull the full Sleeper NFL player list (~11,000 players, a few MB).
 

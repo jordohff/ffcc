@@ -53,9 +53,14 @@ def fit_and_evaluate_by_position(
     each position gets its own feature columns (POSITION_FEATURE_COLUMNS) and
     its own model coefficients rather than sharing one generic feature set.
 
-    Rows with missing features for that position (a player's first few
-    tracked games, with no prior history to average) are dropped - the model
-    has nothing to learn from or predict on for those rows.
+    Rows where the player has no prior game history at all (`avg_fantasy_pts_last3`
+    is NaN - their first tracked game or so) are dropped, since the model has
+    nothing to learn from or predict on for those rows. Individual sparser
+    features (e.g. Next Gen Stats separation, which isn't tracked for every
+    player-week - see features.add_next_gen_features) are allowed to be
+    missing and are median-imputed instead of gating the whole row out -
+    otherwise a single sparse column would silently discard most of the
+    dataset for no good reason.
 
     Prints accuracy per position plus an overall number, and returns the
     dict of fitted models (one per position) plus a combined dataframe of all
@@ -69,8 +74,9 @@ def fit_and_evaluate_by_position(
         if feature_cols is None:
             continue
 
-        pos_train = train[train["position"] == position].dropna(subset=feature_cols)
-        pos_test = test[test["position"] == position].dropna(subset=feature_cols).copy()
+        has_history = ["avg_fantasy_pts_last3"]
+        pos_train = train[train["position"] == position].dropna(subset=has_history)
+        pos_test = test[test["position"] == position].dropna(subset=has_history).copy()
         if pos_train.empty or pos_test.empty:
             continue
 

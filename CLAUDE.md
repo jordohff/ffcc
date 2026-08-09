@@ -155,3 +155,56 @@ in-game randomness (garbage time, injuries during the game, game-flow swings) no
 captures. Bigger future gains likely need either materially different signal (e.g. snap counts/routes
 run, Next Gen Stats separation/pressure metrics, defense-specific personnel tendencies) rather than
 more of the same feature family.
+
+### 2026-08-09 — routes run + Next Gen Stats (separation)
+
+User specifically wanted true routes run (TPRR/YPRR) and NGS separation, since separation is
+"sticky" (stable, talent-driven) in receiver analytics. Investigated data availability first rather
+than guessing:
+
+- **Next Gen Stats receiving** (`nfl.load_nextgen_stats(stat_type="receiving")`) has `avg_separation`,
+  `avg_cushion`, `percent_share_of_intended_air_yards`, `avg_yac_above_expectation` per player per
+  week, keyed by `player_gsis_id` (same ID system as everything else - clean join). Available 2016+.
+  Watch out for `week == 0` rows - those are season-aggregate rows nflreadpy includes in the same
+  table, not per-week data; filtered out in `load_nextgen_receiving`.
+- **True routes run is NOT a field anywhere** in nflreadpy. Built it from `load_participation()`
+  (raw play-by-play personnel, one row per play, `offense_players` as a `;`-delimited gsis_id list)
+  joined against `load_pbp()` filtered to `qb_dropback == 1` (pass attempts + sacks + scrambles -
+  everywhere a receiver would run a route). Counting each WR/RB/TE present on a dropback play as
+  having run a route is the standard public-data proxy for this (slightly overcounts players who
+  stayed in to block instead). Sanity-checked against Justin Jefferson's actual 2023 game log
+  (38-53 routes/game, matching known public data, including his real hamstring-injury absence in
+  weeks 6-13) before trusting it further.
+- **Two real bugs found and fixed during implementation, not just modeling misses:**
+  1. Used participation's own `offense_positions` column to filter to WR/RB/TE - but that column is
+     **100% null for 2016-2022** and only populated from 2023 on (an nflverse charting field added
+     later, never backfilled). This silently limited routes-run computation to 3 seasons and produced
+     misleadingly low coverage (~27-30% instead of ~90-98%). Fixed by tagging each player's position
+     from our own `weekly_stats` (their most common charted position across all weeks) instead of
+     relying on participation's sparse field - removes the season restriction entirely. See the note
+     in `data.load_participation`.
+  2. `fit_and_evaluate_by_position` was doing `dropna(subset=feature_cols)` across a position's ENTIRE
+     feature list. That was fine when every feature had near-complete coverage, but NGS separation
+     coverage is inherently sparse even for legitimate players (WR ~41%, TE ~26%, **RB ~0.07%** - NGS's
+     receiving tracking barely covers RBs at all) - so requiring it non-null wiped out nearly all RB
+     rows and most TE rows (RB disappeared from results entirely; TE R² cratered to 0.070). Fixed by
+     gating only on `avg_fantasy_pts_last3` (has-prior-history) and letting sparse features fall
+     through to the pipeline's existing median imputer, which is what it was built for. **Lesson for
+     future feature additions: check real coverage/null rates before wiring a new column into the
+     required-features gate, not after seeing accuracy crater.**
+- **After both fixes**, routes/NGS features gave a real, modest gain: Ridge R² 0.410 → 0.412 (MAE 4.08
+  → 4.07), gains spread across QB/RB/TE; GBM edged slightly ahead of Ridge for the first time overall
+  (R² 0.414 vs 0.412, MAE 4.06 vs 4.07) - QB especially (R² 0.228 vs 0.210) - while Ridge stayed
+  better at WR. Close enough that **Ridge remains the default** for now; revisit if the feature set
+  keeps growing.
+- **Directly testing the user's stated hypothesis** (does separation correlate with future fantasy
+  points): correlation of `avg_separation_last5` with that week's `fantasy_points_target`, WR only,
+  2016+ = **0.001** - essentially zero. For comparison: `avg_targets_last5` = 0.537, `avg_tprr_last5`
+  = 0.138, `avg_yprr_last5` = 0.148, `avg_cushion_last5` = -0.062, `avg_yac_above_exp_last5` = 0.058.
+  Read: separation being "sticky" is a real, well-documented finding about receiver *talent*
+  persistence and catch-quality/contested-catch ability - but it doesn't translate into predicting
+  *weekly fantasy point totals*, which are dominated by target volume and TD variance, not by how open
+  a receiver got on average. TPRR/YPRR (efficiency-per-route) carry real if modest signal; raw
+  separation currently doesn't earn its keep in this model. Kept in the pipeline anyway (free, doesn't
+  hurt), but don't expect it to be doing much - and don't be surprised if a future feature-importance
+  check confirms it's near-zero weight.
