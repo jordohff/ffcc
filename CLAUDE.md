@@ -390,3 +390,45 @@ Net result of this round: RB/TE/WR backtest correlations improved meaningfully (
 multi-year durability), a real live data-freshness bug got fixed, and every previously-known gap got
 either fixed (survivorship, durability) or given an honest, evidence-based treatment (weighted history
 + age-cliff together, injury detection's real but partial coverage) rather than a superficial pass.
+
+### 2026-08-09 — playoff-games bug fix
+
+User asked why Kyren Williams ranked so high. Investigation found a real, confirmed bug (not just "he's
+good"): `aggregate_season_stats` was counting BOTH regular season AND NFL playoff games (season_type
+REG and POST) toward `games_played` and the per-game rate stats, without separating them. Kyren's team
+(Rams) made deep playoff runs - his "2025 season" showed **20 games** (17 REG + 3 POST) instead of 17,
+with playoff performance blended into his per-game averages. Confirmed this isn't a one-off: **2,281
+player-seasons** in the full dataset have playoff games mixed in - any player whose team makes the
+playoffs is affected, for any season in the dataset.
+
+User's guidance on the fix: none of their leagues score fantasy through the NFL playoffs, so playoff
+games should NOT be counted the same way as regular season games in the rate/durability stats - but
+playoff participation is still informative (a team trusting a player with real January snaps says
+something about role security/health/team quality) and shouldn't be discarded either.
+
+Fix: `aggregate_season_stats` now filters to `season_type == "REG"` for `games_played` and all rate
+stats (the numbers that feed `wavg_` blending and durability). Playoff performance is captured
+SEPARATELY, not blended in: `made_playoffs` (0/1), `playoff_games`, `playoff_ppg` - added as
+`prev_made_playoffs` alongside `prev_games_played` in `COMMON_VET_FEATURES` (single most-recent-season,
+same treatment as games played, not part of the recency-weighted multi-year blend). `playoff_ppg` isn't
+used as a direct model feature yet (NaN for the ~half of players whose team didn't make the playoffs) -
+just exposed in `season_stats` if useful later.
+
+Verified: Kyren's 2025 `games_played` now correctly reads 17 (was 20); his `playoff_ppg` trended up
+year over year (7.5 → 12.85 → 17.77), an interesting real signal now preserved separately instead of
+contaminating his regular-season rate. His board ranking dropped from VBD 94.44 (#6 overall) to 83.40
+(#9 overall, RB5) - directionally correct: still a legitimately highly-ranked workhorse RB, just no
+longer inflated by extra playoff games. Backtest correlations were roughly flat (QB 0.741→0.742, RB
+0.766→0.765, TE 0.813→0.805, WR 0.809→0.804) - expected, since this is a correctness fix affecting a
+specific subset of players (those on playoff teams), not a broad accuracy lever.
+
+**Separately raised: why QB rankings look high (e.g. Josh Allen top-10 overall).** Diagnosed as a real
+modeling-philosophy question, not a bug: top-12 QB median projection is ~289 points vs. RB ~220/WR
+~187 (raw scoring volume from passing + rushing, especially for mobile QBs - `wavg_passing_tds_pg` and
+`wavg_carries_pg` both carry real positive weight in the QB Ridge model). VBD does apply a much higher
+replacement bar for QB (258 points, the projected QB12) than RB (144)/WR (135)/TE (115), but real-world
+redraft ADP typically treats QB replacement level as even MORE generous than "12th best" (streaming/
+matchup-based QB strategies are a viable, common strategy), which our fixed-roster-slot VBD formula
+doesn't capture. **User wants to research/discuss actual draft strategy theory before deciding how (or
+whether) to adjust QB VBD treatment - explicitly did not want a "blind conservative" fix applied without
+that grounding first. No QB-related code changes made yet; this is the open thread for next steps.**

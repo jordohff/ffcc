@@ -53,6 +53,7 @@ DECLINE_AGE = {"RB": 27, "WR": 30, "TE": 30, "QB": 38}
 
 COMMON_VET_FEATURES = [
     "prev_games_played",
+    "prev_made_playoffs",
     "wavg_ppg",
     "age",
     "age_squared",
@@ -111,15 +112,35 @@ def aggregate_season_stats(enriched_weekly: pd.DataFrame) -> pd.DataFrame:
     per-game rates are what carry over player-to-player and year-to-year;
     games played is handled separately as a durability question, not folded
     into the rate stats).
+
+    Only REGULAR SEASON games (season_type == "REG") count toward
+    games_played and the per-game rate stats - none of this project's
+    target leagues play fantasy through the NFL playoffs, so postseason
+    performance shouldn't be blended into what's meant to represent "points
+    per regular season game." This was a real, confirmed bug before this
+    filter existed: games_played could run past the 17-game regular season
+    (up to 20+) for players whose team made a deep playoff run, quietly
+    inflating their per-game averages with extra, non-representative games -
+    2,281 player-seasons in this dataset have playoff games mixed in.
+
+    Playoff participation is still informative, though, just not folded into
+    the rate stats the same way - a team trusting a player with real snaps
+    in January says something about their role/health/team quality heading
+    into next season. Captured separately below as `made_playoffs`/
+    `playoff_games`/`playoff_ppg` rather than either discarded entirely or
+    blended into the regular-season averages.
     """
+    reg = enriched_weekly[enriched_weekly["season_type"] == "REG"]
+    post = enriched_weekly[enriched_weekly["season_type"] == "POST"]
+
     games_played = (
-        enriched_weekly.groupby(["player_id", "player_display_name", "position", "season"])["week"]
+        reg.groupby(["player_id", "player_display_name", "position", "season"])["week"]
         .nunique()
         .reset_index(name="games_played")
     )
 
     per_game = (
-        enriched_weekly.groupby(["player_id", "season"])
+        reg.groupby(["player_id", "season"])
         .agg(
             ppg=("fantasy_points_target", "mean"),
             targets_pg=("targets", "mean"),
@@ -140,7 +161,17 @@ def aggregate_season_stats(enriched_weekly: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
 
-    return games_played.merge(per_game, on=["player_id", "season"], how="left")
+    playoff_stats = (
+        post.groupby(["player_id", "season"])
+        .agg(playoff_games=("week", "nunique"), playoff_ppg=("fantasy_points_target", "mean"))
+        .reset_index()
+    )
+
+    result = games_played.merge(per_game, on=["player_id", "season"], how="left")
+    result = result.merge(playoff_stats, on=["player_id", "season"], how="left")
+    result["made_playoffs"] = result["playoff_games"].notna().astype(int)
+    result["playoff_games"] = result["playoff_games"].fillna(0)
+    return result
 
 
 def flag_injury_affected_weeks(injuries: pd.DataFrame) -> pd.DataFrame:
@@ -354,9 +385,11 @@ def build_season_training_table(
     add_weighted_history_features so the `wavg_` rate features are built
     from injury-affected weeks excluded (see aggregate_healthy_season_stats).
     """
-    prior_games = season_stats.rename(columns={"games_played": "prev_games_played"})
+    prior_games = season_stats.rename(
+        columns={"games_played": "prev_games_played", "made_playoffs": "prev_made_playoffs"}
+    )
     prior_games = prior_games.assign(season=prior_games["season"] + 1)
-    prior_games = prior_games[["player_id", "season", "prev_games_played"]]
+    prior_games = prior_games[["player_id", "season", "prev_games_played", "prev_made_playoffs"]]
 
     table = season_stats.merge(prior_games, on=["player_id", "season"], how="inner")
     table = add_weighted_history_features(table, season_stats, healthy_season_stats)
@@ -383,9 +416,9 @@ def build_prediction_features(
     separately (see build_rookie_training_table/project_rookies).
     """
     prior = season_stats[season_stats["season"] == target_season - 1].copy()
-    table = prior[["player_id", "player_display_name", "position", "games_played"]].rename(
-        columns={"games_played": "prev_games_played"}
-    )
+    table = prior[
+        ["player_id", "player_display_name", "position", "games_played", "made_playoffs"]
+    ].rename(columns={"games_played": "prev_games_played", "made_playoffs": "prev_made_playoffs"})
     table["season"] = target_season
     table = add_weighted_history_features(table, season_stats, healthy_season_stats)
     table = add_age_feature(table, rosters)
