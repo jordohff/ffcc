@@ -432,3 +432,128 @@ matchup-based QB strategies are a viable, common strategy), which our fixed-rost
 doesn't capture. **User wants to research/discuss actual draft strategy theory before deciding how (or
 whether) to adjust QB VBD treatment - explicitly did not want a "blind conservative" fix applied without
 that grounding first. No QB-related code changes made yet; this is the open thread for next steps.**
+
+### 2026-08-09 — QB VBD: researched theory, tried a fix, caught and reverted a math error
+
+Researched real draft-strategy theory before touching anything (per user's explicit instruction not to
+apply a blind fix). Findings, with sources:
+- [FantasyPros' VBD guide](https://www.fantasypros.com/2026/06/fantasy-football-draft-strategy-value-based-drafting-2026/):
+  top-5 QB VORP typically runs **40-80 points** - even elite QBs create little surplus over replacement,
+  because the position is deep/streamable.
+- [sticktothemodel.com](https://sticktothemodel.com/blog/fantasy-football-vorp-explained-2025): explicitly
+  anchors QB replacement level at **QB17** in a standard league, not the naive QB12 - reflecting that
+  backup/streamed QB play is close enough in quality to a rostered starter that real managers stream
+  matchups rather than roster a fixed QB1.
+- [FantasyLife](https://www.fantasylife.com/articles/fantasy/elite-qb-fantasy-football-draft-strategy-josh-allen-is-the-one)/
+  [Footballguys](https://www.footballguys.com/article/2026-fantasy-draft-strategy-guide-quarterbacks):
+  rushing-upside QBs (Allen, Lamar, user separately cited Jayden Daniels 2024) form a real, legitimate
+  separate tier - "QB is deep" doesn't mean "all QBs are equal," it means the DROP-OFF after the
+  rushing-upside tier is shallow.
+
+User confirmed this matched their read and said proceed. **First attempt was wrong, caught before
+shipping as correct**: tried adding a `QB_STREAMING_DEPTH_MULTIPLIER = 1.4` to make QB's VBD
+replacement rank deeper (12 → ~17, matching the QB17 anchor above) - shipped it, then verified against
+the actual board and found QB VBD went UP (Allen 82 → 94), the opposite of the intended effect. Root
+cause: this is a basic sign error, not a subtle modeling issue - `VBD = points(player) - points(replacement
+rank)`, and since points strictly decrease as rank gets worse, a DEEPER replacement rank always means a
+LOWER-scoring baseline, which makes the subtracted number smaller and VBD LARGER for every player above
+that rank, regardless of curve shape. Deepening the rank cannot shrink VBD; only a SHALLOWER rank can.
+**Lesson: when a formula has more than one plausible "more accurate" parameter change, walk through the
+actual arithmetic sign/direction before shipping, not just the qualitative direction of the input.**
+
+Reverted the multiplier entirely (not just set to 1.0 - removed the parameter, since it doesn't do
+anything useful and would be a confusing no-op landmine for later). Checked what the naive, un-adjusted
+QB12 formula actually produces on this project's own 2026 predictions: **top-5 QB VBD of 45.5-66.5**,
+already squarely inside the 40-80 reference range cited above, with ZERO adjustment needed. The
+underlying "QB is overvalued" concern from earlier in this session had already been substantially
+resolved as a side effect of the playoff-games fix (which changed RB/WR total_points_pred, shifting
+QB's RELATIVE position in the board even without touching QB directly) - by the time the math was
+worked through, there wasn't actually a QB miscalibration left to fix. Final board: Josh Allen (first
+QB off the board) sits at #13 overall, VBD 77.11 - a QB1-in-a-tier-of-his-own outcome consistent with
+the rushing-QB-premium theory above, with no QB inflated into the top tier.
+
+`compute_vbd`'s docstring now records this (both the reference numbers AND the reverted/wrong approach)
+so a future session doesn't re-attempt the same backwards fix.
+
+### 2026-08-09 — playoff bug follow-up: touches, vacated opportunity, age-cliff recalibration
+
+User flagged the playoff-games fix wasn't the whole story on McCaffrey, plus wanted empirical research
+on RB workload ("300+ touch curse" theory) and offseason team-context signals (coaching changes,
+vacated targets - specifically cited the Packers losing Dontayvion Wicks (traded) and Romeo Doubs
+(signed with NE) as a concrete example). Investigated before building anything, per established pattern.
+
+**Diagnostic: why McCaffrey specifically looked wrong.** His `wavg_ppg` was being dragged down by
+blending in his 2024 injury-wrecked season (4 games, 10.1 ppg) at 30% weight, even though his very next
+season (2025: 17 games, 21.5 ppg, 413 touches) already demonstrated full recovery - the weighted-history
+scheme has no way to know a bad year was a KNOWN, EXPLAINED, already-resolved injury rather than a
+normal decline. Compounding this, the (now-reverted, see below) age/age² terms were cutting another
+~3+ points/game. Both mechanisms were working against him simultaneously.
+
+**Empirical research: RB touch volume ("300+ touch curse").** Built from this project's own 2010-2024
+training data (not folklore): RB PPG decline the following season is fairly stable (-12% to -14%) from
+150 up through 349 touches, but ACCELERATES sharply past 350 touches (-21.9%) - a real cliff, not a
+smooth trend, and it holds even controlling for age (24-28 prime-years-only subset shows the same
+acceleration, so it's not just an age proxy). Caveat: some of this is plausibly regression-to-the-mean
+(a 300+ touch season is often a career year), but that doesn't matter for prediction purposes - the
+pattern is real and useful either way. **McCaffrey himself is actually an outlier/exception to this
+pattern**: went UP after 326 touches (2018→2019: 20.75→25.8 ppg) and UP again after 329 touches
+(2022→2023: 18.5→22.4 ppg) - his one real decline (2023→2024) tracks to specific documented injuries
+(Achilles, PCL), not a generic touches effect.
+
+**Built `touches_over_150`/`touches_over_350` hinge features** (RB-only - `RB_VET_FEATURES`, not
+WR/TE, which never approach these touch totals) from `prev_touches` (single most-recent season, NOT
+blended across years - matches the single-season-lookback shape of the research). Verified the fitted
+coefficient: `touches_over_350` came back negative (-0.03) as expected, `touches_over_150` slightly
+positive (+0.01) - matches the research shape (flat-to-positive 150-350, genuinely negative only past
+350). RB backtest improved (Spearman 0.766 → 0.771).
+
+**Built `compute_vacated_opportunity`**: for every team/season, sums the PRIOR season's per-game usage
+(targets/carries/routes run) of players who were on that team last season but aren't this season -
+departed via free agency/trade/retirement/release. A team-level "how much opportunity is up for grabs"
+signal, not a prediction of who specifically absorbs it. Fully systematic - built from `rosters` +
+`season_stats`, which the project already had, no new data collection needed. **Verified against the
+Packers case exactly as described**: Doubs (5.3 targets/game) and Wicks (3.5 targets/game) both
+correctly captured as departed, totaling 11.2 vacated targets/game for GB in 2026. Small backtest
+improvement (RB/TE/WR all up slightly; doesn't apply to QB).
+
+**Age-cliff recalibration - found and reverted a second thing along the way.** Diagnosed via an
+isolated-curve check: the fitted age-term contribution swung ~28-30 points across the RB age range
+(22→32), while the ACTUAL empirical ppg-by-age in this project's training data is close to FLAT (age
+22 avg 7.8 ppg vs. age 33 avg 6.5 ppg - no clean monotonic decline in the raw data at all). Root cause:
+`age`, `age_squared`, and `years_past_decline_age` are three highly correlated features, which let
+Ridge produce large, unstable coefficients that partially canceled out in-sample but distorted
+predictions at the sparse age-30+ tail (46 training rows at 31, 15 at 33). **Fix: removed `age` and
+`age_squared` entirely, kept only `years_past_decline_age`** (the single well-motivated, position-
+calibrated hinge). User then asked to also account for "elite players decline at a lesser cliff" (a
+real, documented pattern) - tried an interaction term `years_past_decline_age * wavg_ppg` to let the
+penalty scale down for high-quality players. **This came back with the WRONG sign** (penalized
+elite-and-aging players MORE, not less) and made McCaffrey rank WORSE (VBD 55.95 → 40.58), not better -
+reverted immediately rather than shipped on a result moving the wrong direction. Likely cause: the
+"old AND elite" cell of the training data is tiny (very few RB-seasons combine age 30+ with elite
+production), so the interaction coefficient was probably fitting noise in that sparse corner. Full
+detail preserved in `add_age_curve_features`'s docstring for anyone revisiting this - it needs either
+much more data at that intersection or a model family that handles sparse interactions better than
+Ridge, not another attempt at the same linear interaction.
+
+**Net effect on the aging-elite-RB problem**: even without the interaction term, just removing the
+unstable age/age² polynomial fixed most of it. Final state: McCaffrey RB13 (VBD 54.24), Henry RB7
+(VBD 87.11, at age 32.7!), Barkley RB9 (VBD 80.15) - all landing in sensible ranges instead of being
+crushed. Small aggregate backtest cost (RB Spearman 0.771 → 0.764 after removing age/age² - the more
+complex version fit the bulk of in-sample data slightly better even though it behaved implausibly at
+the tail) - a deliberate robustness-over-marginal-fit tradeoff, judged worth it given the tail behavior
+was the actual problem being reported.
+
+**Coaching data - scoped, not yet built.** User wants a maintained dataset covering: HC/OC lineage
+(what offenses new coaches previously ran), a quality ranking for those offenses, and run-scheme
+classification (zone vs. man/gap) with RB scheme-fit. Investigated feasibility before committing:
+- **HC lineage is buildable now** - `load_schedules()` has `home_coach`/`away_coach` for every game,
+  already cached historically + 2026. No new data collection needed.
+- **OC lineage has NO structured source anywhere** - schedules only tracks head coaches. Confirmed
+  needs manual research/curation, matching the user's own conclusion.
+- **Scheme classification (zone vs. man/gap) has NO free structured source.** Checked play-by-play
+  directly: `run_location`/`run_gap` exist but are DIRECTIONAL charting (left/middle/right,
+  end/guard/tackle - where the run went), not BLOCKING-SCHEME classification (how the line blocked).
+  True scheme data is the kind of thing PFF/Sports Info Solutions charts and sells; not public.
+  **User decided: skip scheme for now, build coaching lineage + quality first.**
+- User wants the coaching dataset built as a maintained data file (not a live-queryable source),
+  updated each offseason. Not yet built - next task.

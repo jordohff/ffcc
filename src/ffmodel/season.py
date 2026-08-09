@@ -51,12 +51,19 @@ RATE_STAT_COLUMNS = [c for c in SEASON_STAT_COLUMNS if c != "games_played"]
 # decline matters far less for a passer than for a player taking hits).
 DECLINE_AGE = {"RB": 27, "WR": 30, "TE": 30, "QB": 38}
 
+# RB next-season PPG decline by prior-season touch volume (2010-2024 seasons,
+# this project's own data): roughly stable at -12% to -14% from 150 up
+# through 349 touches, then ACCELERATES sharply past 350 touches (-21.9%) -
+# holds even controlling for age (24-28 prime-years-only subset shows the
+# same acceleration), so it's not just an age proxy. Two hinge points
+# reproduce that shape: one where the general high-usage effect starts,
+# one where it visibly steepens. See add_touch_volume_features.
+TOUCH_VOLUME_HINGES = [150, 350]
+
 COMMON_VET_FEATURES = [
     "prev_games_played",
     "prev_made_playoffs",
     "wavg_ppg",
-    "age",
-    "age_squared",
     "years_past_decline_age",
     "team_changed",
 ]
@@ -72,6 +79,9 @@ SKILL_VET_FEATURES = COMMON_VET_FEATURES + [
     "wavg_cushion",
     "wavg_ngs_air_yards_share",
     "wavg_yac_above_exp",
+    "vacated_targets_pg",
+    "vacated_carries_pg",
+    "vacated_routes_run_pg",
 ]
 
 QB_VET_FEATURES = COMMON_VET_FEATURES + [
@@ -82,9 +92,13 @@ QB_VET_FEATURES = COMMON_VET_FEATURES + [
     "wavg_passing_epa_pg",
 ]
 
+# RB-only: touch-volume hinge features (see add_touch_volume_features) -
+# not meaningful for WR/TE, which essentially never reach these touch totals.
+RB_VET_FEATURES = SKILL_VET_FEATURES + [f"touches_over_{h}" for h in TOUCH_VOLUME_HINGES]
+
 POSITION_VET_FEATURES = {
     "QB": QB_VET_FEATURES,
-    "RB": SKILL_VET_FEATURES,
+    "RB": RB_VET_FEATURES,
     "WR": SKILL_VET_FEATURES,
     "TE": SKILL_VET_FEATURES,
 }
@@ -130,8 +144,9 @@ def aggregate_season_stats(enriched_weekly: pd.DataFrame) -> pd.DataFrame:
     `playoff_games`/`playoff_ppg` rather than either discarded entirely or
     blended into the regular-season averages.
     """
-    reg = enriched_weekly[enriched_weekly["season_type"] == "REG"]
+    reg = enriched_weekly[enriched_weekly["season_type"] == "REG"].copy()
     post = enriched_weekly[enriched_weekly["season_type"] == "POST"]
+    reg["touches"] = reg["carries"].fillna(0) + reg["receptions"].fillna(0)
 
     games_played = (
         reg.groupby(["player_id", "player_display_name", "position", "season"])["week"]
@@ -157,6 +172,7 @@ def aggregate_season_stats(enriched_weekly: pd.DataFrame) -> pd.DataFrame:
             cushion=("avg_cushion", "mean"),
             ngs_air_yards_share=("ngs_air_yards_share", "mean"),
             yac_above_exp=("avg_yac_above_expectation", "mean"),
+            touches=("touches", "sum"),
         )
         .reset_index()
     )
@@ -250,29 +266,72 @@ def add_age_feature(table: pd.DataFrame, rosters: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_age_curve_features(table: pd.DataFrame) -> pd.DataFrame:
-    """Add non-linear age features on top of the plain `age` column, so a
-    linear model (Ridge) can still fit a realistic career-arc shape instead
-    of a straight line.
+    """Add `years_past_decline_age`: a position-specific "hinge" that's zero
+    until a player passes the age where THAT position's production typically
+    falls off a cliff (see DECLINE_AGE), then grows 1-for-1 after - e.g. a
+    35-year-old RB gets years_past_decline_age = 8.
 
-    `age_squared` lets the model fit a general rise-then-fall parabola.
-    `years_past_decline_age` is a position-specific "hinge" that's zero until
-    a player passes the age where THAT position's production typically falls
-    off a cliff (see DECLINE_AGE), then grows 1-for-1 after - e.g. a
-    35-year-old RB gets years_past_decline_age = 8, a strong, explicit
-    "this specific player is well past the cliff" signal.
-
-    This exists specifically to counteract a side effect of
-    add_weighted_history_features: blending in a strong season from a few
-    years back correctly helps a player mean-reverting from a fluky down
-    year, but WRONGLY inflates an aging player whose decline is real and
-    structural, not noise - the model needs some way to tell those two cases
-    apart, and age is the only signal available for that distinction.
+    NOTE on things tried and reverted here, kept for anyone revisiting this:
+    1. Plain `age`/`age_squared` were tried alongside this hinge and removed.
+       The isolated age-term contribution swung ~28-30 points across the RB
+       age range while the actual empirical ppg-by-age in this project's
+       training data is close to FLAT (age 22 avg 7.8 ppg vs. age 33 avg 6.5
+       ppg, no clean monotonic decline). That's a multicollinearity symptom:
+       age, age^2, and years_past_decline_age are all highly correlated with
+       each other, which let Ridge produce large, unstable coefficients that
+       partially canceled out in-sample but distorted predictions at the
+       age-30+ tail where training data is sparse (46 rows at 31, 15 at 33).
+    2. An interaction term (`years_past_decline_age * wavg_ppg`) was tried to
+       let elite players decline more gently than replacement-level players
+       at the same age - a real, documented pattern in principle. It came
+       back with the WRONG sign (penalized elite-and-aging players MORE, not
+       less) and made a known test case (McCaffrey) rank worse, not better.
+       Likely cause: the "old AND elite" cell of the training data is tiny
+       (very few RB-seasons combine age 30+ with elite production), so the
+       interaction coefficient is probably fitting noise in that sparse
+       corner rather than a real signal. Reverted rather than shipped on a
+       result moving the wrong direction. If revisited, this likely needs
+       either much more data at that intersection or a non-linear model
+       family that handles sparse interactions more gracefully than Ridge.
     """
     table = table.copy()
-    table["age_squared"] = table["age"] ** 2
     decline_age = table["position"].map(DECLINE_AGE).fillna(30)
     table["years_past_decline_age"] = (table["age"] - decline_age).clip(lower=0)
     return table
+
+
+def add_touch_volume_features(table: pd.DataFrame) -> pd.DataFrame:
+    """Add RB-specific touch-volume hinge features from `prev_touches` (last
+    season's total carries + receptions, NOT blended across years - this is
+    a single-season-lookback effect per the research, not a career-average
+    one). `touches_over_150` and `touches_over_350` are each zero until
+    `prev_touches` passes that threshold, then grow 1-for-1 - lets Ridge fit
+    a steeper slope specifically above 350 instead of one straight line
+    across the whole range.
+
+    Only meaningful for RB (see RB_VET_FEATURES) - WRs/TEs essentially never
+    approach these touch totals (their workload is overwhelmingly receptions,
+    not combined carries+receptions), so this wasn't researched or intended
+    for those positions.
+    """
+    table = table.copy()
+    for hinge in TOUCH_VOLUME_HINGES:
+        table[f"touches_over_{hinge}"] = (table["prev_touches"] - hinge).clip(lower=0)
+    return table
+
+
+def _team_by_season(rosters: pd.DataFrame) -> pd.DataFrame:
+    """Each player's team for each season they were rostered - the most
+    common team that season, in the rare case a mid-season trade means more
+    than one row. Shared by add_team_change_feature and
+    compute_vacated_opportunity, which both need "who was on what team when."
+    """
+    return (
+        rosters.groupby(["gsis_id", "season"])["team"]
+        .agg(lambda s: s.mode().iat[0] if not s.mode().empty else None)
+        .reset_index()
+        .rename(columns={"gsis_id": "player_id"})
+    )
 
 
 def add_team_change_feature(table: pd.DataFrame, rosters: pd.DataFrame) -> pd.DataFrame:
@@ -284,12 +343,7 @@ def add_team_change_feature(table: pd.DataFrame, rosters: pd.DataFrame) -> pd.Da
     worth flagging even though we don't model exactly which direction it'll
     push a given player.
     """
-    team_by_season = (
-        rosters.groupby(["gsis_id", "season"])["team"]
-        .agg(lambda s: s.mode().iat[0] if not s.mode().empty else None)
-        .reset_index()
-        .rename(columns={"gsis_id": "player_id"})
-    )
+    team_by_season = _team_by_season(rosters)
     prev_team = team_by_season.rename(columns={"team": "prev_team"})
     prev_team = prev_team.assign(season=prev_team["season"] + 1)
 
@@ -298,6 +352,57 @@ def add_team_change_feature(table: pd.DataFrame, rosters: pd.DataFrame) -> pd.Da
     table["team_changed"] = (
         table["team"].notna() & table["prev_team"].notna() & (table["team"] != table["prev_team"])
     ).astype(int)
+    return table
+
+
+def compute_vacated_opportunity(season_stats: pd.DataFrame, rosters: pd.DataFrame) -> pd.DataFrame:
+    """For every team and season, sum the PRIOR season's per-game usage
+    (targets, carries, routes run) of every player who was on that team last
+    season but isn't this season - left via free agency, trade, retirement,
+    or release.
+
+    This is a TEAM-level "how much opportunity is now up for grabs" signal,
+    not a prediction of who specifically absorbs it - that's left to each
+    remaining/incoming player's own features (target share, depth chart
+    role, etc.) to sort out. Computed for every season in the data (not just
+    the season being projected) so the model can actually learn whether
+    vacated opportunity predicts anything, rather than having it applied
+    only at prediction time with no historical grounding.
+    """
+    team_by_season = _team_by_season(rosters)
+
+    prior = team_by_season.rename(columns={"team": "prior_team", "season": "prior_season"})
+    prior = prior.assign(season=prior["prior_season"] + 1)
+
+    compare = prior.merge(team_by_season, on=["player_id", "season"], how="left")
+    departed = compare[compare["team"].isna() | (compare["team"] != compare["prior_team"])]
+
+    prior_stats = season_stats[["player_id", "season", "targets_pg", "carries_pg", "routes_run_pg"]].rename(
+        columns={"season": "prior_season"}
+    )
+    departed = departed.merge(prior_stats, on=["player_id", "prior_season"], how="inner")
+
+    return (
+        departed.groupby(["prior_team", "season"])
+        .agg(
+            vacated_targets_pg=("targets_pg", "sum"),
+            vacated_carries_pg=("carries_pg", "sum"),
+            vacated_routes_run_pg=("routes_run_pg", "sum"),
+        )
+        .reset_index()
+        .rename(columns={"prior_team": "team"})
+    )
+
+
+def add_vacated_opportunity_features(table: pd.DataFrame, vacated: pd.DataFrame) -> pd.DataFrame:
+    """Merge in the team-level vacated-opportunity signal (see
+    compute_vacated_opportunity) for the player's CURRENT team/season.
+    Teams with no departures (or players not matched to a team) get 0,
+    not NaN - no vacancy is a real, informative value here, not missing data.
+    """
+    table = table.merge(vacated, on=["team", "season"], how="left")
+    for col in ["vacated_targets_pg", "vacated_carries_pg", "vacated_routes_run_pg"]:
+        table[col] = table[col].fillna(0)
     return table
 
 
@@ -386,16 +491,18 @@ def build_season_training_table(
     from injury-affected weeks excluded (see aggregate_healthy_season_stats).
     """
     prior_games = season_stats.rename(
-        columns={"games_played": "prev_games_played", "made_playoffs": "prev_made_playoffs"}
+        columns={"games_played": "prev_games_played", "made_playoffs": "prev_made_playoffs", "touches": "prev_touches"}
     )
     prior_games = prior_games.assign(season=prior_games["season"] + 1)
-    prior_games = prior_games[["player_id", "season", "prev_games_played", "prev_made_playoffs"]]
+    prior_games = prior_games[["player_id", "season", "prev_games_played", "prev_made_playoffs", "prev_touches"]]
 
     table = season_stats.merge(prior_games, on=["player_id", "season"], how="inner")
     table = add_weighted_history_features(table, season_stats, healthy_season_stats)
     table = add_age_feature(table, rosters)
     table = add_age_curve_features(table)
+    table = add_touch_volume_features(table)
     table = add_team_change_feature(table, rosters)
+    table = add_vacated_opportunity_features(table, compute_vacated_opportunity(season_stats, rosters))
     return table
 
 
@@ -417,13 +524,17 @@ def build_prediction_features(
     """
     prior = season_stats[season_stats["season"] == target_season - 1].copy()
     table = prior[
-        ["player_id", "player_display_name", "position", "games_played", "made_playoffs"]
-    ].rename(columns={"games_played": "prev_games_played", "made_playoffs": "prev_made_playoffs"})
+        ["player_id", "player_display_name", "position", "games_played", "made_playoffs", "touches"]
+    ].rename(
+        columns={"games_played": "prev_games_played", "made_playoffs": "prev_made_playoffs", "touches": "prev_touches"}
+    )
     table["season"] = target_season
     table = add_weighted_history_features(table, season_stats, healthy_season_stats)
     table = add_age_feature(table, rosters)
     table = add_age_curve_features(table)
+    table = add_touch_volume_features(table)
     table = add_team_change_feature(table, rosters)
+    table = add_vacated_opportunity_features(table, compute_vacated_opportunity(season_stats, rosters))
     return table
 
 
@@ -651,13 +762,24 @@ def compute_vbd(
     projected total points, then subtract the projection of the "replacement
     level" player at that position - the best player who'd likely still be on
     the wire given your league's roster requirements. This is what actually
-    drives draft order: the RB QB12 in a shallow class is worth more than a
+    drives draft order: the RB12 in a shallow class is worth more than a
     similarly-projected WR12 in a deep one, and raw points alone can't tell
     you that.
 
     Flex slots are split across RB/WR/TE using a standard rule of thumb (most
     flex starts go to RB/WR, TE less often) - override the defaults if your
     league's roster requirements differ.
+
+    Note on QB: a naive teams*qb_slots replacement rank (QB12 in a standard
+    12-team league) already produces top-5 QB VBD in the 40-80 range cited by
+    public VORP methodology (sticktothemodel.com/FantasyPros) - verified
+    against this project's own 2026 predictions (Josh Allen 66.5, down to
+    Drake Maye 45.5). A "deepen the replacement rank to QB17" adjustment was
+    tried and reverted: it's mathematically backwards - a DEEPER replacement
+    rank means a LOWER-scoring replacement player, which makes the subtracted
+    baseline smaller and VBD LARGER, the opposite of the intended effect.
+    Deliberately not "fixed" further since the naive formula already matches
+    the reference range without adjustment.
     """
     board = board.copy()
     board["position_rank"] = board.groupby("position")["total_points_pred"].rank(
