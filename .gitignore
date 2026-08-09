@@ -16,3 +16,5 @@ data/processed/*
 !data/processed/.gitkeep
 output/projections/*
 !output/projections/.gitkeep
+output/draft_rankings/*
+!output/draft_rankings/.gitkeep

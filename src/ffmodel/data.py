@@ -110,6 +110,68 @@ def load_nextgen_receiving(seasons: list[int]) -> pd.DataFrame:
     return ngs[ngs["week"] > 0].reset_index(drop=True)
 
 
+def load_roster_info(seasons: list[int]) -> pd.DataFrame:
+    """Pull roster info: team, roster status, birth date, years of
+    experience, and draft slot, for the given seasons.
+
+    Used two ways: (1) historically, to compute each player's age and team
+    in past seasons for training the draft-rankings model, and (2) for the
+    current season, to get each player's CURRENT team/status - catching
+    offseason trades/free agency/retirements that last season's stats alone
+    wouldn't reflect. `status` is worth filtering on for a final draft board
+    (ACT = active roster; also RES/E14/RET/CUT for injured reserve/exempt/
+    retired/released - not startable).
+    """
+    import nflreadpy as nfl
+
+    rosters = nfl.load_rosters(seasons).select(
+        ["season", "gsis_id", "team", "position", "status", "birth_date", "years_exp"]
+    )
+    return rosters.to_pandas()
+
+
+def load_draft_pick_capital(seasons: list[int]) -> pd.DataFrame:
+    """Pull NFL draft picks (round/pick/position/college) for the given
+    draft-class seasons.
+
+    Used both to train the rookie projection model (historical draft slot ->
+    historical rookie-season production) and to project this year's actual
+    incoming rookie class - `seasons` should include the current year, whose
+    draft has already happened by the time this project cares about it
+    (NFL draft is held every April, well before fantasy drafts in August).
+    """
+    import nflreadpy as nfl
+
+    picks = nfl.load_draft_picks(seasons).select(
+        ["season", "round", "pick", "team", "position", "gsis_id", "pfr_player_name"]
+    )
+    return picks.to_pandas()
+
+
+def load_current_depth_chart(season: int) -> pd.DataFrame:
+    """Pull the MOST RECENT live depth chart snapshot for the current season
+    (team, position, depth rank within that position).
+
+    The live feed actually contains many repeated snapshots over time (one
+    per `dt` timestamp, taken as the depth chart gets updated through camp/
+    the season) - naively dropping `dt` collapses those into duplicate rows
+    per player, so we explicitly keep only the latest timestamp.
+
+    NOTE: this only works for the CURRENT in-progress season - nflverse's
+    depth chart archive for past seasons uses a different schema entirely
+    (keyed by week/depth_team, not a live timestamp/pos_rank), so this isn't
+    comparable across years. Because of that mismatch, this is used ONLY as
+    current-context info for the final draft board (e.g. "is this player
+    currently listed as the starter"), not as a trained historical feature.
+    """
+    import nflreadpy as nfl
+
+    dc = nfl.load_depth_charts([season]).to_pandas()
+    dc = dc[dc["pos_abb"].isin(FANTASY_POSITIONS)]
+    latest = dc["dt"].max()
+    return dc[dc["dt"] == latest].reset_index(drop=True)
+
+
 def fetch_sleeper_players() -> pd.DataFrame:
     """Pull the full Sleeper NFL player list (~11,000 players, a few MB).
 

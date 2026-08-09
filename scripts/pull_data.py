@@ -13,10 +13,13 @@ import pandas as pd
 
 from ffmodel.data import (
     fetch_sleeper_players,
+    load_current_depth_chart,
+    load_draft_pick_capital,
     load_injury_reports,
     load_nextgen_receiving,
     load_participation,
     load_pbp_dropbacks,
+    load_roster_info,
     load_schedules,
     load_weekly_stats,
 )
@@ -46,6 +49,12 @@ def main() -> None:
         nargs="+",
         default=list(range(2010, 2026)),
         help="Seasons to pull weekly stats for (default: 2010-2025)",
+    )
+    parser.add_argument(
+        "--current-season",
+        type=int,
+        default=2026,
+        help="The in-progress season to pull current rosters/draft class/depth chart for (default: 2026)",
     )
     parser.add_argument(
         "--force",
@@ -103,6 +112,28 @@ def main() -> None:
             lambda: load_nextgen_receiving(ngs_seasons),
             args.force,
         )
+
+    # Draft-rankings pipeline needs the CURRENT season too (not just history) -
+    # rosters/draft class for 2026 reflect this year's actual situation.
+    roster_seasons = sorted(set(args.seasons) | {args.current_season})
+    _pull_and_cache(
+        "rosters.parquet",
+        f"roster info for seasons {roster_seasons}",
+        lambda: load_roster_info(roster_seasons),
+        args.force,
+    )
+    _pull_and_cache(
+        "draft_picks.parquet",
+        f"draft picks for seasons {roster_seasons}",
+        lambda: load_draft_pick_capital(roster_seasons),
+        args.force,
+    )
+    _pull_and_cache(
+        "current_depth_chart.parquet",
+        f"current ({args.current_season}) depth chart",
+        lambda: load_current_depth_chart(args.current_season),
+        args.force,
+    )
 
 
 if __name__ == "__main__":
