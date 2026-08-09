@@ -22,6 +22,7 @@ import pandas as pd
 from ffmodel.features import compute_routes_run
 from ffmodel.season import (
     aggregate_season_stats,
+    apply_current_team_from_sleeper,
     build_enriched_weekly,
     build_prediction_features,
     build_rookie_training_table,
@@ -51,7 +52,8 @@ def load_raw():
     participation = pd.read_parquet(RAW_DIR / "participation.parquet")
     ngs = pd.read_parquet(RAW_DIR / "nextgen_receiving.parquet")
     depth_chart = pd.read_parquet(RAW_DIR / "current_depth_chart.parquet")
-    return weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart
+    sleeper_players = pd.read_parquet(RAW_DIR / "sleeper_players.parquet")
+    return weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart, sleeper_players
 
 
 def backtest(training_table: pd.DataFrame, test_season: int, top_n: int) -> None:
@@ -95,7 +97,7 @@ def main() -> None:
     parser.add_argument("--flex-slots", type=int, default=1)
     args = parser.parse_args()
 
-    weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart = load_raw()
+    weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart, sleeper_players = load_raw()
 
     print("Building season-level stats...")
     routes = compute_routes_run(pbp, participation, weekly)
@@ -138,6 +140,12 @@ def main() -> None:
 
     board = pd.concat([vet_board, rookie_board], ignore_index=True)
     board = board.dropna(subset=["ppg_pred", "total_points_pred"])
+
+    print("Overriding team with Sleeper's current data (fresher than nflverse rosters)...")
+    board = apply_current_team_from_sleeper(board, sleeper_players)
+    n_mismatch = int(board["team_mismatch"].sum())
+    if n_mismatch:
+        print(f"  {n_mismatch} players had a stale nflverse team vs. Sleeper's current team - using Sleeper's")
 
     print("Merging current roster status and depth chart context...")
     status = (

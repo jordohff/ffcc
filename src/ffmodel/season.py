@@ -317,6 +317,62 @@ def estimate_games_played(prev_games_played: pd.Series, max_games: int = 17) -> 
     return prev_games_played.clip(upper=max_games)
 
 
+# Sleeper and nflverse otherwise agree on team codes, but use different
+# abbreviations for these two teams - normalize to nflverse's convention
+# (used everywhere else in this pipeline) before comparing/using Sleeper's
+# team field, or every Cardinals/Rams player falsely shows up as a "mismatch".
+SLEEPER_TEAM_CODE_FIXES = {"ARI": "AZ", "LAR": "LA"}
+
+
+def apply_current_team_from_sleeper(board: pd.DataFrame, sleeper_players: pd.DataFrame) -> pd.DataFrame:
+    """Override each player's team with Sleeper's, when available, and add
+    current injury/depth-chart context from the same source.
+
+    nflverse's roster snapshot (used everywhere else in this pipeline for
+    historical team-by-season lookups) is a periodic pull and can lag real
+    transactions by days to weeks. Sleeper is a live fantasy platform that
+    needs to stay current for its own users, so it tends to reflect very
+    recent moves faster - confirmed empirically: as of 2026-08-09, nflverse's
+    roster pull still showed Stefon Diggs on NE (released back in March 2026)
+    while Sleeper already had his correct signing with WAS from the prior
+    week. `team` here is kept as the SLEEPER-preferred value used everywhere
+    downstream; the original nflverse-derived value is kept as `team_nflverse`
+    and `team_mismatch` flags any disagreement, so a mismatch is visible
+    rather than silently overwritten.
+    """
+    sleeper = (
+        sleeper_players.dropna(subset=["gsis_id"])
+        .drop_duplicates(subset="gsis_id")
+        # Sleeper's own "player_id" column is THEIR internal numeric ID, not
+        # gsis_id - drop it first so renaming gsis_id -> player_id below
+        # doesn't collide and produce two same-named columns.
+        .drop(columns="player_id")
+        .rename(
+            columns={
+                "gsis_id": "player_id",
+                "team": "sleeper_team",
+                "injury_status": "current_injury_status",
+                "injury_body_part": "current_injury_body_part",
+                "depth_chart_order": "sleeper_depth_chart_order",
+            }
+        )
+    )
+    sleeper["sleeper_team"] = sleeper["sleeper_team"].replace(SLEEPER_TEAM_CODE_FIXES)
+    keep = [
+        "player_id",
+        "sleeper_team",
+        "current_injury_status",
+        "current_injury_body_part",
+        "sleeper_depth_chart_order",
+    ]
+    board = board.rename(columns={"team": "team_nflverse"}).merge(sleeper[keep], on="player_id", how="left")
+    board["team"] = board["sleeper_team"].fillna(board["team_nflverse"])
+    board["team_mismatch"] = (
+        board["team_nflverse"].notna() & board["sleeper_team"].notna() & (board["team_nflverse"] != board["sleeper_team"])
+    )
+    return board
+
+
 def evaluate_rankings(
     df: pd.DataFrame,
     actual_col: str = "total_points",
