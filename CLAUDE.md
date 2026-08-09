@@ -672,3 +672,28 @@ like a "prev_" feature actually IS one - the test is whether the underlying fact
 AFTER the season (performance stats: lag it) or is already decided BEFORE the season starts (contracts,
 coaching, current roster: don't lag it, use the target season itself).
 
+
+
+### 2026-08-09 â€” snap-share trend: progressive weighting instead of a hard cutoff
+
+User feedback on the snap-share trend feature: don't use a blunt first-half/second-half split -
+weight weeks progressively, with games closer to the end of the season counting more.
+
+Replaced `compute_snap_share_trend`'s two-bucket design (mean of weeks 1-9 vs mean of weeks 10-18)
+with a continuous recency-weighted average: each week's `offense_pct` is weighted by its own week
+number (week 17 counts ~17x as much as week 1), computed as `sum(week * offense_pct) / sum(week)`.
+`snap_share_trend` is now the weighted average minus the plain (unweighted) season average - positive
+means the recency-weighted view sits above the flat average (role grew), negative means below (role
+shrank) - same interpretation as before, no longer dependent on an arbitrary cutoff week.
+
+Re-validated against the same Kyren Williams/Blake Corum 2025 test case: weighted average 65.5% vs
+plain average 68.3% for Kyren (below flat average, correctly negative trend, -0.028); weighted 31.4%
+vs plain 29.1% for Corum (above flat average, correctly positive trend, +0.023). Same direction as the
+two-bucket version, smaller magnitude (expected - measuring a different quantity, weighted-vs-flat
+rather than second-half-vs-first-half), smoother/more principled without a cutoff-week decision to
+defend. Backtest was flat to a hair lower (RB 0.772 -> 0.772, TE/WR/QB within noise) - a genuine
+"equally accurate, more defensible methodology" outcome, not a clear accuracy win, reported honestly
+rather than oversold. 2026 board: Kyren stays RB6 (VBD 88.92, was 88.68), Corum stays deep on the
+board (VBD -41.37, was -39.96) - materially unchanged, as expected for a refinement to how an existing
+signal is computed rather than a new signal entirely.
+

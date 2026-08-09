@@ -325,33 +325,39 @@ def add_touch_volume_features(table: pd.DataFrame) -> pd.DataFrame:
     return table
 
 
-# Week to split the regular season into "first half" vs "second half" for
-# snap-share trend purposes. 9 splits an 18-week season roughly evenly.
-SNAP_SHARE_TREND_SPLIT_WEEK = 9
+def compute_snap_share_trend(snap_share: pd.DataFrame) -> pd.DataFrame:
+    """For every player-season, compute a PROGRESSIVELY recency-weighted
+    average offensive snap share across the whole regular season - each
+    week is weighted by its own week number (week 17 counts ~17x as much as
+    week 1), so the result reflects where a player's role ENDED UP rather
+    than treating every week of the season equally.
 
+    This replaces an earlier first-half/second-half split, which only had
+    two discrete buckets and an arbitrary cutoff week - a player whose role
+    changed gradually and continuously (the common case) is better captured
+    by weighting every week's distance from the end of the season, not by
+    which side of one cutoff each week happened to fall on.
 
-def compute_snap_share_trend(
-    snap_share: pd.DataFrame, first_half_max_week: int = SNAP_SHARE_TREND_SPLIT_WEEK
-) -> pd.DataFrame:
-    """For every player-season, compute the trailing in-season TREND in
-    offensive snap share: second-half average offense_pct minus first-half
-    average. Positive means a player's role was GROWING as the season
-    progressed (gaining trust, a committee-mate declining); negative means
-    it was SHRINKING - signal a single season-long average can't see, since
-    that treats week 1 and week 18 identically.
-
-    Also returns `snap_share_second_half` (the level itself, not just the
-    trend) - a shrinking-but-still-dominant role reads very differently from
-    a shrinking-and-now-shared one, and the trend alone can't distinguish
-    them.
+    Also returns `snap_share_trend`: the weighted average MINUS the plain
+    (unweighted) season average. Positive means the recency-weighted view
+    is higher than a flat average would suggest - the role GREW as the
+    season progressed (gaining trust, a committee-mate declining); negative
+    means it SHRANK. A shrinking-but-still-dominant role reads very
+    differently from a shrinking-and-now-shared one, which is why the level
+    itself is returned alongside the trend, not just the trend alone.
 
     REG season only (`game_type == "REG"` in snap_share).
     """
-    reg = snap_share[snap_share["game_type"] == "REG"]
-    first = reg[reg["week"] <= first_half_max_week].groupby(["player_id", "season"])["offense_pct"].mean()
-    second = reg[reg["week"] > first_half_max_week].groupby(["player_id", "season"])["offense_pct"].mean()
-    trend = (second - first).rename("snap_share_trend")
-    result = pd.concat([trend, second.rename("snap_share_second_half")], axis=1).reset_index()
+    reg = snap_share[snap_share["game_type"] == "REG"].copy()
+    reg["weighted_pct"] = reg["week"] * reg["offense_pct"]
+
+    grouped = reg.groupby(["player_id", "season"])
+    weighted_avg = grouped["weighted_pct"].sum() / grouped["week"].sum()
+    plain_avg = grouped["offense_pct"].mean()
+
+    result = pd.DataFrame(
+        {"snap_share_level": weighted_avg, "snap_share_trend": weighted_avg - plain_avg}
+    ).reset_index()
     return result
 
 
@@ -362,7 +368,7 @@ def add_snap_share_trend_features(table: pd.DataFrame, snap_share_trend: pd.Data
     something to average with two-year-old trends).
     """
     prior = snap_share_trend.rename(
-        columns={"snap_share_trend": "prev_snap_share_trend", "snap_share_second_half": "prev_snap_share_level"}
+        columns={"snap_share_trend": "prev_snap_share_trend", "snap_share_level": "prev_snap_share_level"}
     )
     prior = prior.assign(season=prior["season"] + 1)
     table = table.merge(prior, on=["player_id", "season"], how="left")
