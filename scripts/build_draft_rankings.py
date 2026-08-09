@@ -23,11 +23,13 @@ from ffmodel.features import compute_routes_run
 from ffmodel.season import (
     aggregate_healthy_season_stats,
     aggregate_season_stats,
+    add_offensive_coordinator_context,
     apply_current_team_from_sleeper,
     build_enriched_weekly,
     build_prediction_features,
     build_rookie_training_table,
     build_season_training_table,
+    compute_team_offensive_output,
     compute_vbd,
     estimate_games_played,
     evaluate_rankings,
@@ -38,6 +40,7 @@ from ffmodel.season import (
 )
 
 RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
+COACHING_DIR = Path(__file__).resolve().parents[1] / "data" / "coaching"
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "output" / "draft_rankings"
 
 # Players on injured reserve/exempt list are still worth ranking (could come
@@ -55,7 +58,8 @@ def load_raw():
     depth_chart = pd.read_parquet(RAW_DIR / "current_depth_chart.parquet")
     sleeper_players = pd.read_parquet(RAW_DIR / "sleeper_players.parquet")
     injuries = pd.read_parquet(RAW_DIR / "injuries.parquet")
-    return weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart, sleeper_players, injuries
+    schedules = pd.read_parquet(RAW_DIR / "schedules.parquet")
+    return weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart, sleeper_players, injuries, schedules
 
 
 def backtest(training_table: pd.DataFrame, test_season: int, top_n: int) -> None:
@@ -99,14 +103,14 @@ def main() -> None:
     parser.add_argument("--flex-slots", type=int, default=1)
     args = parser.parse_args()
 
-    weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart, sleeper_players, injuries = load_raw()
+    weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart, sleeper_players, injuries, schedules = load_raw()
 
     print("Building season-level stats...")
     routes = compute_routes_run(pbp, participation, weekly)
     enriched = build_enriched_weekly(weekly, routes, ngs, scoring=args.scoring)
     season_stats = aggregate_season_stats(enriched)
     healthy_season_stats = aggregate_healthy_season_stats(enriched, injuries)
-    training_table = build_season_training_table(season_stats, rosters, healthy_season_stats)
+    training_table = build_season_training_table(season_stats, rosters, schedules, healthy_season_stats)
 
     print()
     backtest(training_table, args.backtest_season, args.top_n)
@@ -114,13 +118,13 @@ def main() -> None:
     print()
     print(f"Fitting final veteran model on all seasons through {args.draft_season - 1}...")
     models = fit_vet_models_by_position(training_table)
-    vet_board = build_prediction_features(season_stats, args.draft_season, rosters, healthy_season_stats)
+    vet_board = build_prediction_features(season_stats, args.draft_season, rosters, schedules, healthy_season_stats)
     vet_board["ppg_pred"] = predict_vet_ppg(models, vet_board)
     vet_board["games_est"] = estimate_games_played(vet_board["wavg_games_played"])
     vet_board["total_points_pred"] = vet_board["ppg_pred"] * vet_board["games_est"]
     vet_board = vet_board[
         ["player_id", "player_display_name", "position", "team", "age", "team_changed",
-         "ppg_pred", "games_est", "total_points_pred"]
+         "new_head_coach", "new_hc_prior_team_ppg", "ppg_pred", "games_est", "total_points_pred"]
     ]
     vet_board["is_rookie"] = 0
     print(f"  {len(vet_board):,} returning players projected")
@@ -134,10 +138,15 @@ def main() -> None:
     rookie_board = rookie_board.rename(columns={"pfr_player_name": "player_display_name"})
     rookie_board["age"] = pd.NA
     rookie_board["team_changed"] = 0
+    # Rookies have no prior season of their own to compare a coaching change
+    # against - not meaningful for them either way, so left at 0 rather than
+    # computed.
+    rookie_board["new_head_coach"] = 0
+    rookie_board["new_hc_prior_team_ppg"] = 0
     rookie_board["is_rookie"] = 1
     rookie_board = rookie_board[
         ["player_id", "player_display_name", "position", "team", "age", "team_changed",
-         "ppg_pred", "games_est", "total_points_pred", "is_rookie"]
+         "new_head_coach", "new_hc_prior_team_ppg", "ppg_pred", "games_est", "total_points_pred", "is_rookie"]
     ]
     print(f"  {len(rookie_board):,} rookies projected")
 
@@ -166,6 +175,15 @@ def main() -> None:
         columns={"gsis_id": "player_id", "pos_rank": "depth_chart_rank"}
     )
     board = board.merge(depth, on="player_id", how="left")
+
+    oc_path = COACHING_DIR / f"offensive_coordinators_{args.draft_season}.csv"
+    if oc_path.exists():
+        print("Merging offensive coordinator context (informational, hand-researched)...")
+        oc_data = pd.read_csv(oc_path)
+        team_output = compute_team_offensive_output(season_stats, rosters)
+        board = add_offensive_coordinator_context(board, oc_data, team_output)
+    else:
+        print(f"  no coaching dataset found at {oc_path}, skipping OC context")
 
     print("Computing value-based rankings...")
     board = compute_vbd(

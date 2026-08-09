@@ -557,3 +557,61 @@ classification (zone vs. man/gap) with RB scheme-fit. Investigated feasibility b
   **User decided: skip scheme for now, build coaching lineage + quality first.**
 - User wants the coaching dataset built as a maintained data file (not a live-queryable source),
   updated each offseason. Not yet built - next task.
+
+
+### 2026-08-09 â€” coaching dataset built (HC automated, OC hand-researched)
+
+**Head coach lineage: fully automated, no manual work needed.** `build_head_coach_history` reshapes
+`schedules`' `home_coach`/`away_coach` (one row per game, already cached 2010-2026) into one row per
+team per season. Confirmed nflreadpy's 2026 schedule data ALREADY has accurate current coaching info
+baked in (Minter at Baltimore, Monken at Cleveland, McCarthy at Pittsburgh - all matched independent
+web research) - no manual verification needed for this piece at all. Gotcha found along the way: the
+cached `schedules.parquet` only covered 2010-2025 (pulled with the historical `--seasons` range, not
+the current draft season) - fixed `pull_data.py` to include `--current-season` in the schedules pull
+too, same pattern already used for rosters/draft_picks.
+
+`add_head_coach_features` adds `new_head_coach` (1/0) and `new_hc_prior_team_ppg` (the incoming
+coach's own team's offensive output the season before, via the new `compute_team_offensive_output` -
+average combined PPG across all of that team's QB/RB/WR/TE, an objective proxy computed from data
+already in the pipeline, not a subjective rating). Verified `new_head_coach` against every confirmed
+2026 change: Baltimore (Henry), Cleveland (Fannin), Las Vegas (Jeanty), Pittsburgh (Metcalf), Tennessee
+(Pollard) all correctly flagged 1; Denver (Bo Nix) correctly flagged 0 since only their OC changed, not
+HC - the feature correctly distinguishes the two. Added to `COMMON_VET_FEATURES` (real historical
+coverage back to 2010, so genuinely trainable, unlike OC below). Small backtest improvement (QB 0.729
+-> 0.731, WR 0.795 -> 0.797).
+
+`new_hc_prior_team_ppg` came back 0.0 for every 2026 example checked - investigated and confirmed this
+is CORRECT, not a bug, for two different reasons: (1) Mike McCarthy's last HC job on record was Dallas
+in 2024, not 2025 - he had a year out of the league before Pittsburgh hired him for 2026, so the
+immediate-prior-season lookup correctly finds nothing (a real, narrow limitation: this only catches
+back-to-back HC transitions, not "returned after a year away"). (2) Klint Kubiak (new Raiders HC) was
+never a head coach anywhere before 2026 - his whole career was as an OC/assistant (Minnesota, New
+Orleans, Seattle), so there's genuinely no HC-level history to find, which is exactly the coverage gap
+that motivated building the separate OC dataset below. Also found a spelling error in nflreadpy's own
+schedule data ("Klint Kubliak") - an upstream data quality quirk, not something to fix on our end.
+
+**OC lineage: no structured source exists anywhere (confirmed again), built as a hand-researched,
+maintained CSV instead** (`data/coaching/offensive_coordinators_2026.csv`, 32 rows). Sourced from
+Wikipedia's "List of current NFL offensive coordinators" page (fetched 2026-08-09) - cross-checked
+against independent research and it agreed exactly on the one case with strong independent
+confirmation (Las Vegas: Andrew Janocko is the actual OC, not Klint Kubiak, who's HC - matches earlier
+finding). Columns: team, offensive_coordinator, previous_team, previous_role, is_internal_promotion,
+source_note. `add_offensive_coordinator_context` merges this onto the board as INFORMATIONAL columns
+only, NOT a trained model feature - this file only has one season of coverage (OC history can't be
+reconstructed retroactively without redoing this research for 15 years of staffs, which wasn't
+attempted), so there's nothing to train on yet. `oc_prev_team_ppg` is computed (via the same
+`compute_team_offensive_output` used for HCs) only for the 5 cases where `previous_role` was explicitly
+"offensive coordinator" of another identifiable NFL team (Baltimore/Doyle, NYG/Nagy, Detroit/Petzing,
+Atlanta/Rees, Tampa Bay/Robinson) - verified Detroit's Drew Petzing (from Arizona's OC job) correctly
+shows 5.02, while Las Vegas's Janocko (a QB coach, not an OC, in his prior job) correctly shows NaN.
+Two rows flagged in the CSV's own source_note as worth double-checking (Green Bay's Stenavich may have
+already been OC the prior season internally; Arizona's Hackett's listed prior role, "defensive
+analyst," is an unusual path into an OC job and is worth verifying) - flagged rather than silently
+trusted, since this whole file rests on a single AI-summarized web source.
+
+**Maintenance note for future seasons**: `offensive_coordinators_<season>.csv` needs a fresh version
+researched each offseason (the loader in `build_draft_rankings.py` looks for
+`data/coaching/offensive_coordinators_{draft_season}.csv` and skips this step entirely if missing, so
+forgetting to update it fails soft, not hard). As more seasons accumulate, this could eventually become
+a real trained feature the way `new_head_coach` already is - not there yet with just one year of data.
+

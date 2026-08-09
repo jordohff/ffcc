@@ -65,6 +65,12 @@ def main() -> None:
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Draft-rankings pipeline needs the CURRENT season too (not just history) -
+    # rosters/schedules/draft class for 2026 reflect this year's actual situation
+    # (schedules specifically carries home_coach/away_coach, used for head-coach
+    # lineage tracking - see season.build_head_coach_history).
+    roster_seasons = sorted(set(args.seasons) | {args.current_season})
+
     _pull_and_cache(
         "weekly_stats.parquet",
         f"weekly player stats for seasons {args.seasons}",
@@ -73,8 +79,8 @@ def main() -> None:
     )
     _pull_and_cache(
         "schedules.parquet",
-        f"schedules for seasons {args.seasons}",
-        lambda: load_schedules(args.seasons),
+        f"schedules for seasons {roster_seasons}",
+        lambda: load_schedules(roster_seasons),
         args.force,
     )
     _pull_and_cache(
@@ -113,9 +119,6 @@ def main() -> None:
             args.force,
         )
 
-    # Draft-rankings pipeline needs the CURRENT season too (not just history) -
-    # rosters/draft class for 2026 reflect this year's actual situation.
-    roster_seasons = sorted(set(args.seasons) | {args.current_season})
     _pull_and_cache(
         "rosters.parquet",
         f"roster info for seasons {roster_seasons}",

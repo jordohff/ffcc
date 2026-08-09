@@ -66,6 +66,8 @@ COMMON_VET_FEATURES = [
     "wavg_ppg",
     "years_past_decline_age",
     "team_changed",
+    "new_head_coach",
+    "new_hc_prior_team_ppg",
 ]
 
 SKILL_VET_FEATURES = COMMON_VET_FEATURES + [
@@ -406,11 +408,134 @@ def add_vacated_opportunity_features(table: pd.DataFrame, vacated: pd.DataFrame)
     return table
 
 
+def build_head_coach_history(schedules: pd.DataFrame) -> pd.DataFrame:
+    """One row per team per season with that team's head coach, built from
+    schedules' `home_coach`/`away_coach` (one row per game - nflreadpy has
+    no OC-level equivalent anywhere; see the separately maintained OC
+    dataset in data/coaching/ for that piece, which only covers 2026 since
+    it required manual research, not a structured data source).
+
+    Takes the most common coach that season per team, in the rare case of
+    an in-season firing/interim change.
+    """
+    home = schedules[["season", "home_team", "home_coach"]].rename(
+        columns={"home_team": "team", "home_coach": "head_coach"}
+    )
+    away = schedules[["season", "away_team", "away_coach"]].rename(
+        columns={"away_team": "team", "away_coach": "head_coach"}
+    )
+    games = pd.concat([home, away], ignore_index=True).dropna(subset=["head_coach"])
+    return (
+        games.groupby(["team", "season"])["head_coach"]
+        .agg(lambda s: s.mode().iat[0] if not s.mode().empty else None)
+        .reset_index()
+    )
+
+
+def compute_team_offensive_output(season_stats: pd.DataFrame, rosters: pd.DataFrame) -> pd.DataFrame:
+    """Team-level offensive output per season: average combined PPG across
+    all QB/RB/WR/TE on that team's roster. A simple, objective proxy for
+    "how productive was this offense," computed entirely from data already
+    in this pipeline - not a subjective coach rating.
+    """
+    team_by_season = _team_by_season(rosters)
+    with_team = season_stats.merge(team_by_season, on=["player_id", "season"], how="inner")
+    return with_team.groupby(["team", "season"])["ppg"].mean().reset_index(name="team_offensive_ppg")
+
+
+def add_head_coach_features(
+    table: pd.DataFrame, coach_history: pd.DataFrame, team_output: pd.DataFrame
+) -> pd.DataFrame:
+    """Add `new_head_coach` (1/0: did this team change HC from last season to
+    this one) and `new_hc_prior_team_ppg` (that incoming coach's team's
+    offensive output in the season right before this one, from
+    compute_team_offensive_output - 0 if the coach wasn't a HC anywhere the
+    prior season, e.g. a first-time HC or someone promoted from within, or
+    if there was no coaching change at all).
+
+    This only tracks HEAD coaches, not coordinators (see
+    build_head_coach_history for why) - a new OC running the same HC's
+    system is a real, common case this feature won't catch, by design/data
+    limitation, not an oversight.
+    """
+    prev_coach = coach_history.rename(columns={"head_coach": "prev_head_coach"})
+    prev_coach = prev_coach.assign(season=prev_coach["season"] + 1)
+
+    merged = coach_history.merge(prev_coach, on=["team", "season"], how="left")
+    merged["new_head_coach"] = (
+        merged["prev_head_coach"].notna() & (merged["head_coach"] != merged["prev_head_coach"])
+    ).astype(int)
+
+    # the new coach's own team+season from last year (wherever they were, if anywhere)
+    prev_output = team_output.rename(columns={"team": "prev_hc_team", "team_offensive_ppg": "new_hc_prior_team_ppg"})
+    prev_coach_team = coach_history.rename(columns={"team": "prev_hc_team", "head_coach": "coach_lookup"})
+    prev_coach_team = prev_coach_team.assign(season=prev_coach_team["season"] + 1)
+    merged = merged.merge(
+        prev_coach_team, left_on=["head_coach", "season"], right_on=["coach_lookup", "season"], how="left"
+    )
+    merged = merged.merge(prev_output, on=["prev_hc_team", "season"], how="left")
+    # only relevant when there WAS a coaching change and the new team differs from where they just were
+    merged.loc[
+        (merged["new_head_coach"] == 0) | (merged["prev_hc_team"] == merged["team"]), "new_hc_prior_team_ppg"
+    ] = 0
+    merged["new_hc_prior_team_ppg"] = merged["new_hc_prior_team_ppg"].fillna(0)
+
+    table = table.merge(
+        merged[["team", "season", "new_head_coach", "new_hc_prior_team_ppg"]], on=["team", "season"], how="left"
+    )
+    table["new_head_coach"] = table["new_head_coach"].fillna(0)
+    table["new_hc_prior_team_ppg"] = table["new_hc_prior_team_ppg"].fillna(0)
+    return table
+
+
+def add_offensive_coordinator_context(
+    board: pd.DataFrame, oc_data: pd.DataFrame, team_output: pd.DataFrame
+) -> pd.DataFrame:
+    """Merge in the maintained offensive-coordinator dataset (see
+    data/coaching/offensive_coordinators_2026.csv) as INFORMATIONAL board
+    columns - NOT a trained model feature. OC lineage has no structured
+    historical data source anywhere (unlike head coaches - see
+    build_head_coach_history), so this file only covers 2026, researched by
+    hand. Once several seasons accumulate here, it could become a real
+    trained feature the same way new_head_coach is; for now it's context for
+    the human reading the board, refreshed by hand each offseason.
+
+    `oc_prev_team_ppg` is only populated when `previous_role` was explicitly
+    an "offensive coordinator" job at another identifiable NFL team (looked
+    up via compute_team_offensive_output for the season right before this
+    one) - internal promotions and non-OC prior roles (position coach, etc.)
+    don't have a comparable external track record to look up.
+    """
+    oc = oc_data.copy()
+    oc["lookup_season"] = oc["season"] - 1
+    prev_output = team_output.rename(
+        columns={"team": "previous_team", "season": "lookup_season", "team_offensive_ppg": "oc_prev_team_ppg"}
+    )
+    oc = oc.merge(prev_output, on=["previous_team", "lookup_season"], how="left")
+    oc.loc[oc["previous_role"] != "offensive coordinator", "oc_prev_team_ppg"] = pd.NA
+
+    return board.merge(
+        oc[
+            [
+                "team",
+                "offensive_coordinator",
+                "previous_team",
+                "previous_role",
+                "is_internal_promotion",
+                "oc_prev_team_ppg",
+            ]
+        ],
+        on="team",
+        how="left",
+    )
+
+
 def add_weighted_history_features(
     table: pd.DataFrame,
     season_stats: pd.DataFrame,
     healthy_season_stats: pd.DataFrame | None = None,
     weights: list[float] = HISTORY_WEIGHTS,
+    full_season_games: int = 17,
 ) -> pd.DataFrame:
     """Blend the last `len(weights)` seasons of each stat into one
     recency-weighted feature (`wavg_<stat>`) instead of relying only on the
@@ -427,6 +552,18 @@ def add_weighted_history_features(
     2nd-year player with only 1 prior season just uses that season at full
     weight, not 50% weight against two missing/zero seasons.
 
+    Each season's contribution to the RATE-stat blend (not games_played -
+    see below) is ALSO scaled by how many games it contains relative to a
+    full season (games_played / full_season_games, capped at 1), on top of
+    the base recency weight. Without this, a heavily injury-SHORTENED
+    season gets the SAME weight as a full healthy season purely because of
+    when it happened, letting a small, unrepresentative sample dominate a
+    player's history - e.g. McCaffrey's 4-game 2024 was getting full 30%
+    recency weight in wavg_ppg despite being a tiny sample, even though his
+    very next season (2025, a full 17 games) already showed he'd fully
+    recovered. `games_played`'s own blend is NOT reliability-weighted this
+    way - scaling games played by games played would be circular.
+
     `healthy_season_stats`, if given, is used as the source for every RATE
     stat (RATE_STAT_COLUMNS - ppg, targets_pg, etc.) INSTEAD of season_stats -
     i.e. built with weeks affected by a persisting injury excluded (see
@@ -440,6 +577,7 @@ def add_weighted_history_features(
 
     table = table.copy()
     lag_cols_by_stat = {stat: [] for stat in SEASON_STAT_COLUMNS}
+    games_col_by_lag = {}
 
     for lag, _ in enumerate(weights, start=1):
         games_col = f"_lag{lag}_games_played"
@@ -449,6 +587,7 @@ def add_weighted_history_features(
         games_shifted = games_shifted.assign(season=games_shifted["season"] + lag)
         table = table.merge(games_shifted, on=["player_id", "season"], how="left")
         lag_cols_by_stat["games_played"].append(games_col)
+        games_col_by_lag[lag] = games_col
 
         rate_cols = [f"_lag{lag}_{c}" for c in RATE_STAT_COLUMNS]
         rate_shifted = healthy_season_stats.rename(columns=dict(zip(RATE_STAT_COLUMNS, rate_cols)))
@@ -460,11 +599,28 @@ def add_weighted_history_features(
             lag_cols_by_stat[stat].append(col)
 
     weight_arr = np.array(weights)
+    # How "full" each lag's season was (0-1), 0 (not NaN) when that season
+    # doesn't exist at all - avoids NaN propagating into the weighted sums.
+    reliability_by_lag = np.column_stack(
+        [
+            np.nan_to_num(
+                (table[games_col_by_lag[lag]].to_numpy(dtype=float) / full_season_games).clip(0, 1),
+                nan=0.0,
+            )
+            for lag in range(1, len(weights) + 1)
+        ]
+    )
+
     for stat, cols in lag_cols_by_stat.items():
         values = table[cols].to_numpy(dtype=float)
         available = ~np.isnan(values)
-        weighted_sum = np.nansum(values * weight_arr, axis=1)
-        weight_total = (available * weight_arr).sum(axis=1)
+        effective_weight = (
+            np.broadcast_to(weight_arr, values.shape)
+            if stat == "games_played"
+            else weight_arr[np.newaxis, :] * reliability_by_lag
+        )
+        weighted_sum = np.nansum(np.nan_to_num(values, nan=0.0) * effective_weight, axis=1)
+        weight_total = (available * effective_weight).sum(axis=1)
         with np.errstate(invalid="ignore", divide="ignore"):
             table[f"wavg_{stat}"] = np.where(weight_total > 0, weighted_sum / weight_total, np.nan)
         table = table.drop(columns=cols)
@@ -473,7 +629,10 @@ def add_weighted_history_features(
 
 
 def build_season_training_table(
-    season_stats: pd.DataFrame, rosters: pd.DataFrame, healthy_season_stats: pd.DataFrame | None = None
+    season_stats: pd.DataFrame,
+    rosters: pd.DataFrame,
+    schedules: pd.DataFrame,
+    healthy_season_stats: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build the veteran training table: for each player-season Y where we
     also have that player's season Y-1 stats, attach recency-weighted
@@ -503,6 +662,9 @@ def build_season_training_table(
     table = add_touch_volume_features(table)
     table = add_team_change_feature(table, rosters)
     table = add_vacated_opportunity_features(table, compute_vacated_opportunity(season_stats, rosters))
+    coach_history = build_head_coach_history(schedules)
+    team_output = compute_team_offensive_output(season_stats, rosters)
+    table = add_head_coach_features(table, coach_history, team_output)
     return table
 
 
@@ -510,6 +672,7 @@ def build_prediction_features(
     season_stats: pd.DataFrame,
     target_season: int,
     rosters: pd.DataFrame,
+    schedules: pd.DataFrame,
     healthy_season_stats: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build feature rows for predicting `target_season`, which hasn't been
@@ -535,6 +698,9 @@ def build_prediction_features(
     table = add_touch_volume_features(table)
     table = add_team_change_feature(table, rosters)
     table = add_vacated_opportunity_features(table, compute_vacated_opportunity(season_stats, rosters))
+    coach_history = build_head_coach_history(schedules)
+    team_output = compute_team_offensive_output(season_stats, rosters)
+    table = add_head_coach_features(table, coach_history, team_output)
     return table
 
 
