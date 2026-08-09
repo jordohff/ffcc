@@ -36,27 +36,49 @@ SEASON_STAT_COLUMNS = [
     "yac_above_exp",
 ]
 
-COMMON_VET_FEATURES = ["prev_games_played", "prev_ppg", "age", "team_changed"]
+# Recency weights for blending the last N seasons of each stat into one
+# feature (see add_weighted_history_features) - most recent season first.
+HISTORY_WEIGHTS = [0.5, 0.3, 0.2]
+
+# Every SEASON_STAT_COLUMNS entry except games_played - the "how good is this
+# player" rate stats, as opposed to the "how often do they play" durability
+# stat, which is tracked separately (see add_weighted_history_features and
+# aggregate_healthy_season_stats for why they use different source data).
+RATE_STAT_COLUMNS = [c for c in SEASON_STAT_COLUMNS if c != "games_played"]
+
+# Age where each position's production typically starts falling off a cliff -
+# RBs decline earliest and most sharply, QBs latest/least abruptly (physical
+# decline matters far less for a passer than for a player taking hits).
+DECLINE_AGE = {"RB": 27, "WR": 30, "TE": 30, "QB": 38}
+
+COMMON_VET_FEATURES = [
+    "prev_games_played",
+    "wavg_ppg",
+    "age",
+    "age_squared",
+    "years_past_decline_age",
+    "team_changed",
+]
 
 SKILL_VET_FEATURES = COMMON_VET_FEATURES + [
-    "prev_targets_pg",
-    "prev_carries_pg",
-    "prev_target_share",
-    "prev_routes_run_pg",
-    "prev_tprr",
-    "prev_yprr",
-    "prev_separation",
-    "prev_cushion",
-    "prev_ngs_air_yards_share",
-    "prev_yac_above_exp",
+    "wavg_targets_pg",
+    "wavg_carries_pg",
+    "wavg_target_share",
+    "wavg_routes_run_pg",
+    "wavg_tprr",
+    "wavg_yprr",
+    "wavg_separation",
+    "wavg_cushion",
+    "wavg_ngs_air_yards_share",
+    "wavg_yac_above_exp",
 ]
 
 QB_VET_FEATURES = COMMON_VET_FEATURES + [
-    "prev_carries_pg",
-    "prev_attempts_pg",
-    "prev_passing_yards_pg",
-    "prev_passing_tds_pg",
-    "prev_passing_epa_pg",
+    "wavg_carries_pg",
+    "wavg_attempts_pg",
+    "wavg_passing_yards_pg",
+    "wavg_passing_tds_pg",
+    "wavg_passing_epa_pg",
 ]
 
 POSITION_VET_FEATURES = {
@@ -121,6 +143,63 @@ def aggregate_season_stats(enriched_weekly: pd.DataFrame) -> pd.DataFrame:
     return games_played.merge(per_game, on=["player_id", "season"], how="left")
 
 
+def flag_injury_affected_weeks(injuries: pd.DataFrame) -> pd.DataFrame:
+    """Flag player-weeks that are part of a PERSISTING injury: the player
+    was Questionable or Doubtful for the same body part in both this week
+    and the week before (consecutive weeks, same season).
+
+    Deliberately requires 2+ consecutive weeks of the SAME body part, not
+    just any single injury-report appearance - a one-off Friday game-time-
+    decision tag that resolves by itself is normal and shouldn't suppress a
+    whole season's numbers; a nagging issue a player is visibly playing
+    through week after week is what we actually want to catch. The week
+    that starts a 2-week streak already counts (it's the second consecutive
+    week of the same issue), not just later weeks in a longer streak.
+    """
+    reports = (
+        injuries.dropna(subset=["gsis_id"])
+        .sort_values("date_modified")
+        .drop_duplicates(subset=["season", "week", "gsis_id"], keep="last")
+        .rename(columns={"gsis_id": "player_id"})
+    ).sort_values(["player_id", "season", "week"])
+
+    reports = reports.copy()
+    reports["is_hurt"] = reports["report_status"].isin(["Questionable", "Doubtful"])
+    reports["body_part"] = reports["report_primary_injury"].fillna("")
+
+    grouped = reports.groupby("player_id")
+    prev_hurt = grouped["is_hurt"].shift(1).fillna(False)
+    prev_body_part = grouped["body_part"].shift(1)
+    prev_week = grouped["week"].shift(1)
+    prev_season = grouped["season"].shift(1)
+
+    reports["injury_affected"] = (
+        reports["is_hurt"]
+        & prev_hurt
+        & (reports["body_part"] == prev_body_part)
+        & (reports["body_part"] != "")
+        & (reports["season"] == prev_season)
+        & (reports["week"] == prev_week + 1)
+    )
+    return reports[["player_id", "season", "week", "injury_affected"]]
+
+
+def aggregate_healthy_season_stats(enriched_weekly: pd.DataFrame, injuries: pd.DataFrame) -> pd.DataFrame:
+    """Same as aggregate_season_stats, but excluding weeks flagged as part of
+    a persisting injury (see flag_injury_affected_weeks) from the per-game
+    RATE stats - a player's production while playing through a lingering
+    injury understates their true talent level, so those weeks shouldn't
+    drag down the historical signal fed to the model (see
+    add_weighted_history_features, which uses this as the source for rate
+    stats specifically, NOT for games played/durability).
+    """
+    flags = flag_injury_affected_weeks(injuries)
+    healthy = enriched_weekly.merge(flags, on=["player_id", "season", "week"], how="left")
+    healthy["injury_affected"] = healthy["injury_affected"].fillna(False).astype(bool)
+    healthy = healthy[~healthy["injury_affected"]]
+    return aggregate_season_stats(healthy)
+
+
 def add_age_feature(table: pd.DataFrame, rosters: pd.DataFrame) -> pd.DataFrame:
     """Add age (in years) as of September 1 of the season in `table`.
 
@@ -137,6 +216,32 @@ def add_age_feature(table: pd.DataFrame, rosters: pd.DataFrame) -> pd.DataFrame:
     season_start = pd.to_datetime(table["season"].astype(str) + "-09-01")
     table["age"] = (season_start - pd.to_datetime(table["birth_date"])).dt.days / 365.25
     return table.drop(columns="birth_date")
+
+
+def add_age_curve_features(table: pd.DataFrame) -> pd.DataFrame:
+    """Add non-linear age features on top of the plain `age` column, so a
+    linear model (Ridge) can still fit a realistic career-arc shape instead
+    of a straight line.
+
+    `age_squared` lets the model fit a general rise-then-fall parabola.
+    `years_past_decline_age` is a position-specific "hinge" that's zero until
+    a player passes the age where THAT position's production typically falls
+    off a cliff (see DECLINE_AGE), then grows 1-for-1 after - e.g. a
+    35-year-old RB gets years_past_decline_age = 8, a strong, explicit
+    "this specific player is well past the cliff" signal.
+
+    This exists specifically to counteract a side effect of
+    add_weighted_history_features: blending in a strong season from a few
+    years back correctly helps a player mean-reverting from a fluky down
+    year, but WRONGLY inflates an aging player whose decline is real and
+    structural, not noise - the model needs some way to tell those two cases
+    apart, and age is the only signal available for that distinction.
+    """
+    table = table.copy()
+    table["age_squared"] = table["age"] ** 2
+    decline_age = table["position"].map(DECLINE_AGE).fillna(30)
+    table["years_past_decline_age"] = (table["age"] - decline_age).clip(lower=0)
+    return table
 
 
 def add_team_change_feature(table: pd.DataFrame, rosters: pd.DataFrame) -> pd.DataFrame:
@@ -165,46 +270,126 @@ def add_team_change_feature(table: pd.DataFrame, rosters: pd.DataFrame) -> pd.Da
     return table
 
 
-def build_season_training_table(season_stats: pd.DataFrame, rosters: pd.DataFrame) -> pd.DataFrame:
+def add_weighted_history_features(
+    table: pd.DataFrame,
+    season_stats: pd.DataFrame,
+    healthy_season_stats: pd.DataFrame | None = None,
+    weights: list[float] = HISTORY_WEIGHTS,
+) -> pd.DataFrame:
+    """Blend the last `len(weights)` seasons of each stat into one
+    recency-weighted feature (`wavg_<stat>`) instead of relying only on the
+    single most recent season.
+
+    This is what lets a proven player coming off one down/injury year still
+    show up as good on paper: someone who put up 18 ppg for two years then
+    had a 12-ppg down year lands around 15-16 here (weighted toward, but not
+    solely anchored to, the down year) instead of being fully anchored to it
+    the way a single prior-season feature would be.
+
+    Weights default to 50/30/20 for the last 3 seasons, renormalized per
+    player based on how many of those seasons actually exist - e.g. a
+    2nd-year player with only 1 prior season just uses that season at full
+    weight, not 50% weight against two missing/zero seasons.
+
+    `healthy_season_stats`, if given, is used as the source for every RATE
+    stat (RATE_STAT_COLUMNS - ppg, targets_pg, etc.) INSTEAD of season_stats -
+    i.e. built with weeks affected by a persisting injury excluded (see
+    aggregate_healthy_season_stats), so a lingering injury doesn't drag down
+    what we treat as a player's true talent level. `games_played`
+    (durability) always comes from the unfiltered `season_stats` regardless -
+    durability should reflect games ACTUALLY played, healthy or not.
+    """
+    if healthy_season_stats is None:
+        healthy_season_stats = season_stats
+
+    table = table.copy()
+    lag_cols_by_stat = {stat: [] for stat in SEASON_STAT_COLUMNS}
+
+    for lag, _ in enumerate(weights, start=1):
+        games_col = f"_lag{lag}_games_played"
+        games_shifted = season_stats[["player_id", "season", "games_played"]].rename(
+            columns={"games_played": games_col}
+        )
+        games_shifted = games_shifted.assign(season=games_shifted["season"] + lag)
+        table = table.merge(games_shifted, on=["player_id", "season"], how="left")
+        lag_cols_by_stat["games_played"].append(games_col)
+
+        rate_cols = [f"_lag{lag}_{c}" for c in RATE_STAT_COLUMNS]
+        rate_shifted = healthy_season_stats.rename(columns=dict(zip(RATE_STAT_COLUMNS, rate_cols)))
+        rate_shifted = rate_shifted.assign(season=rate_shifted["season"] + lag)
+        table = table.merge(
+            rate_shifted[["player_id", "season", *rate_cols]], on=["player_id", "season"], how="left"
+        )
+        for stat, col in zip(RATE_STAT_COLUMNS, rate_cols):
+            lag_cols_by_stat[stat].append(col)
+
+    weight_arr = np.array(weights)
+    for stat, cols in lag_cols_by_stat.items():
+        values = table[cols].to_numpy(dtype=float)
+        available = ~np.isnan(values)
+        weighted_sum = np.nansum(values * weight_arr, axis=1)
+        weight_total = (available * weight_arr).sum(axis=1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            table[f"wavg_{stat}"] = np.where(weight_total > 0, weighted_sum / weight_total, np.nan)
+        table = table.drop(columns=cols)
+
+    return table
+
+
+def build_season_training_table(
+    season_stats: pd.DataFrame, rosters: pd.DataFrame, healthy_season_stats: pd.DataFrame | None = None
+) -> pd.DataFrame:
     """Build the veteran training table: for each player-season Y where we
-    also have that player's season Y-1 stats, use season Y-1 (prefixed
-    `prev_`) as features and season Y's `ppg` as the target.
+    also have that player's season Y-1 stats, attach recency-weighted
+    multi-season history (`wavg_`, see add_weighted_history_features) plus
+    last season's games played (`prev_games_played`, for durability) as
+    features, and season Y's `ppg` as the target.
 
     Players with no season Y-1 row (true rookies, or anyone who missed the
     entire prior season) are excluded here - the model literally has nothing
     to condition on for them. They're handled by the separate rookie model
     (see build_rookie_training_table), which uses draft capital instead.
-    """
-    prior = season_stats.rename(columns={c: f"prev_{c}" for c in SEASON_STAT_COLUMNS})
-    prior = prior.assign(season=prior["season"] + 1)
-    prior = prior[["player_id", "season", *[f"prev_{c}" for c in SEASON_STAT_COLUMNS]]]
 
-    table = season_stats.merge(prior, on=["player_id", "season"], how="inner")
+    `healthy_season_stats`, if given, is passed through to
+    add_weighted_history_features so the `wavg_` rate features are built
+    from injury-affected weeks excluded (see aggregate_healthy_season_stats).
+    """
+    prior_games = season_stats.rename(columns={"games_played": "prev_games_played"})
+    prior_games = prior_games.assign(season=prior_games["season"] + 1)
+    prior_games = prior_games[["player_id", "season", "prev_games_played"]]
+
+    table = season_stats.merge(prior_games, on=["player_id", "season"], how="inner")
+    table = add_weighted_history_features(table, season_stats, healthy_season_stats)
     table = add_age_feature(table, rosters)
+    table = add_age_curve_features(table)
     table = add_team_change_feature(table, rosters)
     return table
 
 
 def build_prediction_features(
-    season_stats: pd.DataFrame, target_season: int, rosters: pd.DataFrame
+    season_stats: pd.DataFrame,
+    target_season: int,
+    rosters: pd.DataFrame,
+    healthy_season_stats: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build feature rows for predicting `target_season`, which hasn't been
     played yet (so it has no row of its own in season_stats) - from each
-    returning player's most recent prior season of stats.
+    returning player's recency-weighted recent history.
 
-    Same shifted-column construction as the `prev_` half of
-    build_season_training_table, just for a single target season that
-    doesn't need to already exist in the data. Only includes players who
-    have a season_stats row for target_season - 1 (i.e. played last season) -
-    true rookies with zero NFL history are handled separately (see
-    build_rookie_training_table/project_rookies).
+    Same construction as build_season_training_table, just for a single
+    target season that doesn't need to already exist in the data. Only
+    includes players who have a season_stats row for target_season - 1 (i.e.
+    played last season) - true rookies with zero NFL history are handled
+    separately (see build_rookie_training_table/project_rookies).
     """
     prior = season_stats[season_stats["season"] == target_season - 1].copy()
-    prior = prior.rename(columns={c: f"prev_{c}" for c in SEASON_STAT_COLUMNS})
-    keep = ["player_id", "player_display_name", "position", *[f"prev_{c}" for c in SEASON_STAT_COLUMNS]]
-    table = prior[keep].copy()
+    table = prior[["player_id", "player_display_name", "position", "games_played"]].rename(
+        columns={"games_played": "prev_games_played"}
+    )
     table["season"] = target_season
+    table = add_weighted_history_features(table, season_stats, healthy_season_stats)
     table = add_age_feature(table, rosters)
+    table = add_age_curve_features(table)
     table = add_team_change_feature(table, rosters)
     return table
 
@@ -220,11 +405,11 @@ def make_vet_pipeline() -> Pipeline:
 
 def fit_vet_models_by_position(train: pd.DataFrame) -> dict[str, Pipeline]:
     """Fit one Ridge model per position predicting next season's PPG from
-    this season's (prefixed `prev_`) stats + age + team_changed.
+    recency-weighted multi-season history (`wavg_`) + age + team_changed.
     """
     models = {}
     for position, feature_cols in POSITION_VET_FEATURES.items():
-        pos_train = train[train["position"] == position].dropna(subset=["prev_ppg"])
+        pos_train = train[train["position"] == position].dropna(subset=["wavg_ppg"])
         if pos_train.empty:
             continue
         pipeline = make_vet_pipeline()
@@ -257,25 +442,37 @@ def build_rookie_training_table(season_stats: pd.DataFrame, draft_picks: pd.Data
     with a recorded stat line matching their draft class year) and attach
     their draft round/pick.
 
-    Note: this only includes rookies who recorded at least one game that
-    season - a rookie who was hurt all year and never played contributes
-    nothing to the average, which means the historical average is implicitly
-    "conditional on playing at least one game," not a true expected value
-    across the whole drafted class. A reasonable v1 simplification, but worth
-    knowing when reading the numbers.
+    Drafted skill-position players who never recorded a single game that
+    season (hurt all year, buried on the depth chart, etc.) are added back
+    in as zero production, not silently excluded - otherwise the historical
+    average is quietly conditioned on "drafted AND played at least once,"
+    which overstates the true expected value of a given draft slot. This
+    means a round's average, e.g., 8.5 ppg, is a true expected value across
+    everyone drafted at that slot historically - including the real chance
+    of a rookie contributing nothing at all - not "8.5 ppg if they play."
     """
     picks = draft_picks.dropna(subset=["gsis_id"]).rename(
-        columns={"gsis_id": "player_id", "season": "draft_season"}
+        columns={"gsis_id": "player_id", "season": "draft_season", "position": "draft_position"}
     )
-    # Use season_stats' own charted position (actual NFL usage), not the
-    # draft position, in case they ever differ (e.g. a college DB drafted
-    # as a WR project) - drop draft_picks' copy to avoid a silent
-    # position_x/position_y column collision on merge.
-    picks = picks.drop(columns="position")
+    picks = picks[picks["draft_position"].isin(POSITION_VET_FEATURES)]
+
+    # Use season_stats' own charted position (actual NFL usage) for players
+    # who DID play, in case it ever differs from their draft-listed position
+    # (e.g. a college DB drafted as a WR project) - keep draft_position
+    # around separately as the fallback for players who never played at all.
     rookie_stats = season_stats.merge(picks, on="player_id", how="inner")
     rookie_stats = rookie_stats[rookie_stats["season"] == rookie_stats["draft_season"]]
-    rookie_stats = rookie_stats.assign(round_bucket=_round_bucket(rookie_stats["round"]))
-    return rookie_stats
+
+    played_keys = rookie_stats[["player_id", "draft_season"]].drop_duplicates()
+    never_played = picks.merge(played_keys, on=["player_id", "draft_season"], how="left", indicator=True)
+    never_played = never_played[never_played["_merge"] == "left_only"].drop(columns="_merge")
+    never_played = never_played.assign(
+        position=never_played["draft_position"], season=never_played["draft_season"], games_played=0, ppg=0.0
+    )
+
+    combined = pd.concat([rookie_stats.drop(columns="draft_position"), never_played], ignore_index=True)
+    combined = combined.assign(round_bucket=_round_bucket(combined["round"]))
+    return combined
 
 
 def fit_rookie_averages(rookie_table: pd.DataFrame) -> pd.DataFrame:
@@ -304,17 +501,23 @@ def project_rookies(current_draft_picks: pd.DataFrame, rookie_averages: pd.DataF
     return picks
 
 
-def estimate_games_played(prev_games_played: pd.Series, max_games: int = 17) -> pd.Series:
-    """Durability estimate: assume similar games played to last season,
+def estimate_games_played(weighted_games_played: pd.Series, max_games: int = 17) -> pd.Series:
+    """Durability estimate: recency-weighted average games played over the
+    last few seasons (see HISTORY_WEIGHTS/add_weighted_history_features),
     capped at a full season.
 
-    Deliberately a simple, transparent heuristic rather than a trained model -
-    it's easy to see (and second-guess) exactly what it's assuming for a
-    given player, which matters more for a durability estimate than squeezing
-    out a bit more accuracy from a black-box model on a genuinely hard
-    problem (in-season injuries are close to unpredictable in advance).
+    Uses multi-year history rather than just last season, so a player with a
+    genuine injury-proneness PATTERN (e.g. 17/10/12 games the last 3 years)
+    gets a lower estimate than someone who had one fluky bad-luck season
+    (e.g. 17/17/10) - the same recency-weighted blend used for the rate
+    stats, applied here to games played specifically. Still a simple,
+    transparent heuristic rather than a trained model - it's easy to see
+    (and second-guess) exactly what it's assuming for a given player, which
+    matters more for a durability estimate than squeezing out a bit more
+    accuracy from a black-box model on a genuinely hard problem (in-season
+    injuries are close to unpredictable in advance).
     """
-    return prev_games_played.clip(upper=max_games)
+    return weighted_games_played.clip(upper=max_games)
 
 
 # Sleeper and nflverse otherwise agree on team codes, but use different

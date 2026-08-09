@@ -21,6 +21,7 @@ import pandas as pd
 
 from ffmodel.features import compute_routes_run
 from ffmodel.season import (
+    aggregate_healthy_season_stats,
     aggregate_season_stats,
     apply_current_team_from_sleeper,
     build_enriched_weekly,
@@ -53,7 +54,8 @@ def load_raw():
     ngs = pd.read_parquet(RAW_DIR / "nextgen_receiving.parquet")
     depth_chart = pd.read_parquet(RAW_DIR / "current_depth_chart.parquet")
     sleeper_players = pd.read_parquet(RAW_DIR / "sleeper_players.parquet")
-    return weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart, sleeper_players
+    injuries = pd.read_parquet(RAW_DIR / "injuries.parquet")
+    return weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart, sleeper_players, injuries
 
 
 def backtest(training_table: pd.DataFrame, test_season: int, top_n: int) -> None:
@@ -70,7 +72,7 @@ def backtest(training_table: pd.DataFrame, test_season: int, top_n: int) -> None
 
     models = fit_vet_models_by_position(train)
     test["ppg_pred"] = predict_vet_ppg(models, test)
-    test["games_est"] = estimate_games_played(test["prev_games_played"])
+    test["games_est"] = estimate_games_played(test["wavg_games_played"])
     test["total_points_pred"] = test["ppg_pred"] * test["games_est"]
     test["total_points"] = test["ppg"] * test["games_played"]
 
@@ -97,13 +99,14 @@ def main() -> None:
     parser.add_argument("--flex-slots", type=int, default=1)
     args = parser.parse_args()
 
-    weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart, sleeper_players = load_raw()
+    weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart, sleeper_players, injuries = load_raw()
 
     print("Building season-level stats...")
     routes = compute_routes_run(pbp, participation, weekly)
     enriched = build_enriched_weekly(weekly, routes, ngs, scoring=args.scoring)
     season_stats = aggregate_season_stats(enriched)
-    training_table = build_season_training_table(season_stats, rosters)
+    healthy_season_stats = aggregate_healthy_season_stats(enriched, injuries)
+    training_table = build_season_training_table(season_stats, rosters, healthy_season_stats)
 
     print()
     backtest(training_table, args.backtest_season, args.top_n)
@@ -111,9 +114,9 @@ def main() -> None:
     print()
     print(f"Fitting final veteran model on all seasons through {args.draft_season - 1}...")
     models = fit_vet_models_by_position(training_table)
-    vet_board = build_prediction_features(season_stats, args.draft_season, rosters)
+    vet_board = build_prediction_features(season_stats, args.draft_season, rosters, healthy_season_stats)
     vet_board["ppg_pred"] = predict_vet_ppg(models, vet_board)
-    vet_board["games_est"] = estimate_games_played(vet_board["prev_games_played"])
+    vet_board["games_est"] = estimate_games_played(vet_board["wavg_games_played"])
     vet_board["total_points_pred"] = vet_board["ppg_pred"] * vet_board["games_est"]
     vet_board = vet_board[
         ["player_id", "player_display_name", "position", "team", "age", "team_changed",

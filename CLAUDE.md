@@ -309,3 +309,84 @@ VBD/replacement level defaults to a standard 12-team 1QB/2RB/2WR/1TE/1FLEX leagu
 2025, standard 12-team league). Output: `output/draft_rankings/draft_rankings_2026_half_ppr.csv`,
 one row per player with `ppg_pred`, `games_est`, `total_points_pred`, `position_rank`, `vbd`, plus
 current team/age/depth-chart-rank/roster-status context.
+
+### 2026-08-09 — draft-rankings round 2: freshness fix + all known limitations addressed
+
+Worked through every item from the previous entry's "not yet done" list, plus two new asks: cross-
+check team data against a live source, and use injury data to discount performance during injury-
+affected stretches. Backtest baseline going in (train < 2025, eval on actual 2025): Spearman QB 0.71/
+RB 0.75/TE 0.79/WR 0.79. Order below is the order implemented, driven by urgency (a live bug found
+during scoping) then the priority list from before.
+
+1. **Team freshness (Sleeper cross-check)** - found BEFORE fixing anything: nflverse's `rosters.parquet`
+   pull had **no 2026 row at all** for Stefon Diggs, who the user confirmed was released by NE in
+   March 2026 and signed with WAS in the week before this session (2026-08-09). This is a real,
+   live-wrong-right-now bug, not a hypothetical - nflverse's roster snapshot is periodic and lags
+   real transactions. Fix: `apply_current_team_from_sleeper` in `season.py` prefers Sleeper's `team`
+   field (a live fantasy platform that has to stay current), falling back to nflverse when Sleeper has
+   no data; keeps both plus a `team_mismatch` flag rather than silently overwriting. Verified Sleeper
+   correctly showed Diggs on WAS. **Bug found while validating this fix**: Sleeper and nflverse use
+   different abbreviations for two teams (`ARI` vs `AZ`, `LAR` vs `LA`) - without normalizing first,
+   6 of 7 flagged "mismatches" were false positives from abbreviation differences, not real moves.
+   Also surfaced (unused until now) that Sleeper's cached player data includes current
+   `injury_status`/`injury_body_part`/`depth_chart_order` - now carried onto the board as informational
+   columns.
+2. **Multi-year weighted history** (biggest lever from before) - `add_weighted_history_features`
+   blends the last 3 seasons of every rate stat with 50/30/20 recency weights (renormalized for
+   players with less history), replacing the single-`prev_`-season features in `POSITION_VET_FEATURES`.
+   Directly fixed the specific gap found last round: Jefferson's `ppg_pred` went 10.02 → 11.78 (now
+   ranked WR5, was previously off the board's top tier entirely), Nico Collins/Lamb/A.J. Brown all
+   improved similarly. **BUT surfaced a new, related problem**: consensus overlap actually dropped
+   12/15 → 8/15, because blending in a stronger season from a few years back also inflates AGING
+   players whose decline is real/structural (McCaffrey, Barkley, Henry all climbed higher). Weighted
+   history can't distinguish "mean-reverting from bad luck" from "declining because old" - that's
+   exactly why age-cliff modeling (next) was reprioritized to immediately follow this, not treated as
+   independent.
+3. **Age-cliff modeling** - added `age_squared` (lets Ridge fit a general parabola) and
+   `years_past_decline_age`, a position-specific hinge feature (zero until a player passes
+   `DECLINE_AGE` for their position - RB 27, WR/TE 30, QB 38 - then grows 1-for-1), specifically to
+   give the model an explicit signal to counteract weighted history's aging-player blind spot. Confirmed
+   directionally: McCaffrey's `ppg_pred` dropped 16.22 (original single-season baseline) → 14.70 after
+   both changes. Aggregate backtest was flat (expected - this is a narrow, targeted fix, not a broad
+   accuracy lever).
+4. **Multi-year durability** - `SEASON_STAT_COLUMNS` already included `games_played`, so
+   `add_weighted_history_features` was already computing `wavg_games_played` as a side effect; just
+   switched `estimate_games_played`'s input from `prev_games_played` (last season only) to
+   `wavg_games_played` (recency-weighted multi-season). Nearly free, and it was the single biggest
+   backtest mover of this round: RB spearman 0.738 → 0.766, TE 0.807 → 0.813 (hit rate 0.750 → 0.792),
+   WR 0.793 → 0.808.
+5. **Rookie survivorship bias** - `build_rookie_training_table` previously inner-joined draft picks to
+   `season_stats`, silently dropping any drafted player who never recorded a single game (hurt all
+   year, never made the 53-man roster, etc.) - meaning the historical round-by-position averages were
+   quietly conditioned on "drafted AND played at least once." Fixed by anti-joining to find picks with
+   no matching season, adding them back as explicit zero-production rows. Confirmed working: 248 of
+   1,263 rookie-season rows (20%) are now zero-production, concentrated exactly where expected - late
+   rounds (round 5-7 QB average dropped 5.59 → 2.15 ppg; round 1 barely moved, 13.73 → 13.20, since
+   early picks rarely bust to zero games).
+6. **Injury-aware week detection** - user specifically asked to use injury data to discount
+   performance during injury-affected stretches, and to verify/enhance with web data on top of
+   nflreadpy. Built `flag_injury_affected_weeks`: flags a player-week as injury-affected only when
+   Questionable/Doubtful for the SAME body part in 2+ CONSECUTIVE weeks (deliberately not a single
+   Friday game-status tag, which is normal/common and shouldn't suppress a whole season).
+   `aggregate_healthy_season_stats` excludes those weeks from the RATE stats only (not games played/
+   durability, which must reflect real games played) - wired into `add_weighted_history_features` via
+   a new `healthy_season_stats` parameter that sources rate stats separately from durability.
+   **Verification against real data found a genuine, honestly-reported gap, not a false confirmation**:
+   searched for CeeDee Lamb's well-documented 2024 shoulder injury (per CBS Sports, played through an
+   AC joint sprain from Week 9 to Week 16, ~7-8 weeks, before being shut down for the final two games).
+   nflreadpy's OFFICIAL injury report only shows a designation in Week 11 ("Back," a different body
+   part) and Week 17 ("Shoulder," Out) - weeks 12-16, where he was reportedly playing hurt, have NO
+   report_status at all. Teams apparently don't keep re-listing an established, non-doubtful injury
+   every week, so the official report captures acute "will they play" moments, not full "are they
+   compromised" windows. Checked an alternative structured source (sicscore.com's per-player injury
+   history) as a possible scraping target - it's unstructured narrative text, inconsistently formatted,
+   partly paywalled - **not viable for reliable bulk scraping across hundreds of players/seasons**.
+   **Decision: shipped the nflreadpy-based flag as-is, since it's real and catches SOME genuine
+   multi-week injury stretches, but it's a conservative lower bound, not comprehensive - it will miss
+   cases like Lamb's where a team doesn't keep re-tagging a known issue.** Didn't build a bespoke
+   scraper given no viable bulk-structured source was found; revisit only if a better source turns up.
+
+Net result of this round: RB/TE/WR backtest correlations improved meaningfully (driven mostly by
+multi-year durability), a real live data-freshness bug got fixed, and every previously-known gap got
+either fixed (survivorship, durability) or given an honest, evidence-based treatment (weighted history
++ age-cliff together, injury detection's real but partial coverage) rather than a superficial pass.
