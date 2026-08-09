@@ -81,3 +81,30 @@ hand-edited or committed. Only code is committed.
 - Data pulls are cached to `data/raw/*.parquet` and skipped on reruns unless `--force` is passed
   (`uv run scripts/pull_data.py --force`), per Sleeper's own guidance not to hit their player-list
   endpoint often.
+
+### 2026-08-09 — accuracy iteration
+
+Tried three improvements, evaluated each on the same 2025 half-PPR holdout (baseline: single shared
+Ridge model, MAE 4.23, R² 0.378):
+
+1. **Position-specific models** (separate Ridge model per QB/RB/WR/TE instead of one shared model) —
+   helped: MAE 4.23 → 4.08, R² 0.378 → 0.404. Kept as the default (`fit_and_evaluate_by_position` in
+   `model.py`). QB is consistently the hardest position to project (MAE ~6.8) — high scoring variance
+   (big passing games, rushing upside) that trailing averages alone don't capture well.
+2. **Gradient-boosted trees** (`HistGradientBoostingRegressor` via `--model gbm`) — did NOT help,
+   made things worse (MAE 4.21 vs Ridge's 4.08). Likely too few features (9) and too little data per
+   position for trees to find real interactions instead of overfitting noise. **Ridge stays the
+   default model.** Revisit GBM if the feature set grows substantially or more seasons of data are
+   added.
+3. **Home/away + rest days** (from `nfl.load_schedules()`, merged in as `is_home`/`rest_days`) —
+   effectively no change (MAE/R² identical to 2 decimal places, for both Ridge and GBM). Kept in the
+   codebase since it's cheap and harmless, but it isn't pulling weight - matches the broader finding
+   in fantasy analytics that home/away effects are small relative to usage/opportunity.
+
+Net result of this session: MAE 4.23 → 4.08, R² 0.378 → 0.404. Biggest lever tried so far was
+position-specific models; the two other changes were legitimate misses, not just left out of the
+writeup.
+
+Ideas not yet tried, in rough order of expected value: better matchup signal (pass-rate/game-script
+proxies, not just raw points allowed), injury status merged in from Sleeper, more seasons of history,
+QB-specific features (rushing floor, deep-ball rate) given QB is the weakest position currently.

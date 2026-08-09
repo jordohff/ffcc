@@ -22,6 +22,8 @@ FEATURE_COLUMNS = [
     "avg_target_share_last3",
     "avg_target_share_last5",
     "opp_avg_pts_allowed_last5",
+    "is_home",
+    "rest_days",
 ]
 
 
@@ -99,8 +101,34 @@ def add_matchup_features(df: pd.DataFrame, window: int = MATCHUP_WINDOW) -> pd.D
     return df
 
 
-def build_features(df: pd.DataFrame, scoring: str = "half_ppr") -> pd.DataFrame:
-    """Run the full feature pipeline: target, recent performance, matchup.
+def _team_week_context(schedules: pd.DataFrame) -> pd.DataFrame:
+    """Reshape schedules (one row per game) into one row per team per week,
+    with that team's home/away status and days of rest before the game.
+    """
+    home = schedules[["season", "week", "home_team", "home_rest"]].rename(
+        columns={"home_team": "team", "home_rest": "rest_days"}
+    )
+    home["is_home"] = 1
+    away = schedules[["season", "week", "away_team", "away_rest"]].rename(
+        columns={"away_team": "team", "away_rest": "rest_days"}
+    )
+    away["is_home"] = 0
+    return pd.concat([home, away], ignore_index=True)
+
+
+def add_schedule_context(df: pd.DataFrame, schedules: pd.DataFrame) -> pd.DataFrame:
+    """Add `is_home` (1/0) and `rest_days` for each player's team/week, from
+    the schedule rather than the play-by-play stat lines.
+    """
+    context = _team_week_context(schedules)
+    return df.merge(context, on=["season", "week", "team"], how="left")
+
+
+def build_features(
+    df: pd.DataFrame, schedules: pd.DataFrame, scoring: str = "half_ppr"
+) -> pd.DataFrame:
+    """Run the full feature pipeline: target, recent performance, matchup,
+    schedule context.
 
     Rows for a player's first few tracked games will have NaN features (there's
     no prior history yet to average) - that's expected, not a bug, and those
@@ -109,4 +137,5 @@ def build_features(df: pd.DataFrame, scoring: str = "half_ppr") -> pd.DataFrame:
     df = add_fantasy_target(df, scoring=scoring)
     df = add_recent_performance_features(df)
     df = add_matchup_features(df)
+    df = add_schedule_context(df, schedules)
     return df

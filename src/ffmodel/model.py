@@ -1,6 +1,7 @@
-"""Train and evaluate a simple regression model for weekly fantasy points."""
+"""Train and evaluate regression models for weekly fantasy points."""
 
 import pandas as pd
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, r2_score
@@ -9,21 +10,19 @@ from sklearn.pipeline import Pipeline
 from ffmodel.features import FEATURE_COLUMNS
 
 
-def make_pipeline() -> Pipeline:
-    """A simple, explainable model: median-impute missing features, then a
-    lightly-regularized linear regression (Ridge).
-
-    Ridge is plain linear regression with a small penalty that keeps
-    coefficients from swinging wildly when features are correlated with each
-    other (e.g. targets and target_share move together). It's a standard,
-    boring, easy-to-explain starting point.
+def make_pipeline(kind: str = "ridge") -> Pipeline:
+    """Build a model pipeline. `kind` is "ridge" (linear, regularized) or
+    "gbm" (gradient-boosted trees, captures non-linear effects/interactions
+    that a linear model can't - e.g. "high target share only matters when
+    volume is also high").
     """
-    return Pipeline(
-        [
-            ("impute", SimpleImputer(strategy="median")),
-            ("ridge", Ridge(alpha=1.0)),
-        ]
-    )
+    if kind == "ridge":
+        model = Ridge(alpha=1.0)
+    elif kind == "gbm":
+        model = HistGradientBoostingRegressor(random_state=0)
+    else:
+        raise ValueError(f"Unknown model kind: {kind!r} (use 'ridge' or 'gbm')")
+    return Pipeline([("impute", SimpleImputer(strategy="median")), (kind, model)])
 
 
 def train_test_split_by_season(
@@ -44,19 +43,49 @@ def train_test_split_by_season(
     return train, test
 
 
-def fit_and_evaluate(
-    train: pd.DataFrame, test: pd.DataFrame
-) -> tuple[Pipeline, pd.DataFrame]:
-    """Fit on `train`, predict on `test`, print accuracy, return both."""
-    pipeline = make_pipeline()
-    pipeline.fit(train[FEATURE_COLUMNS], train["fantasy_points_target"])
+def fit_and_evaluate_by_position(
+    train: pd.DataFrame, test: pd.DataFrame, kind: str = "ridge"
+) -> tuple[dict[str, Pipeline], pd.DataFrame]:
+    """Fit one model per position (QB/RB/WR/TE) instead of a single shared model.
 
+    Fantasy scoring is driven by different things per position - a QB's points
+    come mostly from passing yards/TDs, a WR's from targets/air yards - so
+    letting each position have its own coefficients fits noticeably better
+    than forcing one model to average across all of them.
+
+    Prints accuracy per position plus an overall number, and returns the
+    dict of fitted models (one per position) plus `test` with predictions
+    filled in.
+    """
+    models: dict[str, Pipeline] = {}
     test = test.copy()
-    test["projected_points"] = pipeline.predict(test[FEATURE_COLUMNS])
+    test["projected_points"] = float("nan")
 
-    mae = mean_absolute_error(test["fantasy_points_target"], test["projected_points"])
-    r2 = r2_score(test["fantasy_points_target"], test["projected_points"])
-    print(f"Holdout MAE: {mae:.2f} fantasy points (average error per player-week)")
-    print(f"Holdout R^2: {r2:.3f} (share of week-to-week variance explained, 1.0 = perfect)")
+    for position in sorted(train["position"].unique()):
+        pos_train = train[train["position"] == position]
+        pos_test_mask = test["position"] == position
+        if pos_test_mask.sum() == 0:
+            continue
 
-    return pipeline, test
+        pipeline = make_pipeline(kind=kind)
+        pipeline.fit(pos_train[FEATURE_COLUMNS], pos_train["fantasy_points_target"])
+        test.loc[pos_test_mask, "projected_points"] = pipeline.predict(
+            test.loc[pos_test_mask, FEATURE_COLUMNS]
+        )
+        models[position] = pipeline
+
+        pos_mae = mean_absolute_error(
+            test.loc[pos_test_mask, "fantasy_points_target"],
+            test.loc[pos_test_mask, "projected_points"],
+        )
+        pos_r2 = r2_score(
+            test.loc[pos_test_mask, "fantasy_points_target"],
+            test.loc[pos_test_mask, "projected_points"],
+        )
+        print(f"  {position}: MAE {pos_mae:.2f}, R^2 {pos_r2:.3f} (n={pos_test_mask.sum():,})")
+
+    overall_mae = mean_absolute_error(test["fantasy_points_target"], test["projected_points"])
+    overall_r2 = r2_score(test["fantasy_points_target"], test["projected_points"])
+    print(f"Overall: MAE {overall_mae:.2f}, R^2 {overall_r2:.3f}")
+
+    return models, test

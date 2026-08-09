@@ -29,6 +29,19 @@ def load_weekly_stats(seasons: list[int]) -> pd.DataFrame:
     return df[df["position"].isin(FANTASY_POSITIONS)].reset_index(drop=True)
 
 
+def load_schedules(seasons: list[int]) -> pd.DataFrame:
+    """Pull game schedule/context data for the given seasons from nflreadpy.
+
+    One row per game: home/away teams, days of rest each team had going into
+    the game, point spread, etc. Used to add home/away and rest-day context to
+    each player's week.
+    """
+    import nflreadpy as nfl
+
+    schedules = nfl.load_schedules(seasons)
+    return schedules.to_pandas()
+
+
 def fetch_sleeper_players() -> pd.DataFrame:
     """Pull the full Sleeper NFL player list (~11,000 players, a few MB).
 

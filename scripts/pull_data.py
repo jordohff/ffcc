@@ -9,7 +9,7 @@ Usage:
 import argparse
 from pathlib import Path
 
-from ffmodel.data import fetch_sleeper_players, load_weekly_stats
+from ffmodel.data import fetch_sleeper_players, load_schedules, load_weekly_stats
 
 RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
 
@@ -40,6 +40,15 @@ def main() -> None:
         print(f"  saved {len(weekly):,} rows -> {weekly_path}")
     else:
         print(f"  {weekly_path} already exists, skipping (use --force to re-fetch)")
+
+    schedules_path = RAW_DIR / "schedules.parquet"
+    if args.force or not schedules_path.exists():
+        print(f"Pulling schedules for seasons {args.seasons} from nflreadpy...")
+        schedules = load_schedules(args.seasons)
+        schedules.to_parquet(schedules_path, index=False)
+        print(f"  saved {len(schedules):,} games -> {schedules_path}")
+    else:
+        print(f"  {schedules_path} already exists, skipping (use --force to re-fetch)")
 
     players_path = RAW_DIR / "sleeper_players.parquet"
     if args.force or not players_path.exists():

@@ -15,7 +15,7 @@ from pathlib import Path
 import pandas as pd
 
 from ffmodel.features import FEATURE_COLUMNS, build_features
-from ffmodel.model import fit_and_evaluate, train_test_split_by_season
+from ffmodel.model import fit_and_evaluate_by_position, train_test_split_by_season
 
 RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "output" / "projections"
@@ -42,17 +42,25 @@ def main() -> None:
         default=None,
         help="Season to hold out for backtesting (default: most recent season in the data)",
     )
+    parser.add_argument(
+        "--model",
+        choices=["ridge", "gbm"],
+        default="ridge",
+        help="ridge = linear regression (default); gbm = gradient-boosted trees",
+    )
     args = parser.parse_args()
 
     weekly_path = RAW_DIR / "weekly_stats.parquet"
-    if not weekly_path.exists():
-        raise SystemExit(f"{weekly_path} not found - run `uv run scripts/pull_data.py` first.")
+    schedules_path = RAW_DIR / "schedules.parquet"
+    if not weekly_path.exists() or not schedules_path.exists():
+        raise SystemExit(f"Raw data not found in {RAW_DIR} - run `uv run scripts/pull_data.py` first.")
 
     raw = pd.read_parquet(weekly_path)
+    schedules = pd.read_parquet(schedules_path)
     test_season = args.test_season or int(raw["season"].max())
 
     print(f"Building features (scoring={args.scoring})...")
-    featured = build_features(raw, scoring=args.scoring)
+    featured = build_features(raw, schedules, scoring=args.scoring)
 
     train, test = train_test_split_by_season(featured, test_season=test_season)
     print(
@@ -60,7 +68,7 @@ def main() -> None:
         f"testing on season {test_season} ({len(test):,} rows)"
     )
 
-    _, test_with_preds = fit_and_evaluate(train, test)
+    _, test_with_preds = fit_and_evaluate_by_position(train, test, kind=args.model)
 
     out = test_with_preds[DISPLAY_COLUMNS].sort_values(
         ["week", "projected_points"], ascending=[True, False]
@@ -68,7 +76,7 @@ def main() -> None:
     out = out.round(2)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = OUTPUT_DIR / f"projections_{args.scoring}_{test_season}.csv"
+    out_path = OUTPUT_DIR / f"projections_{args.scoring}_{args.model}_{test_season}.csv"
     out.to_csv(out_path, index=False)
     print(f"Wrote {len(out):,} rows -> {out_path}")
 
