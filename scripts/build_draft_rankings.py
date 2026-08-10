@@ -30,6 +30,7 @@ from ffmodel.season import (
     build_prediction_features,
     build_rookie_training_table,
     build_season_training_table,
+    build_team_offense_summary,
     compute_defense_strength,
     compute_strength_of_schedule,
     compute_team_offensive_output,
@@ -210,8 +211,14 @@ def main() -> None:
     # pos_rank is each player's overall depth order at their position on
     # their team (1 = starter) - pos_slot instead distinguishes different
     # depth-chart "columns" (e.g. X/Z/slot WR) and isn't what we want here.
-    depth = depth_chart[["gsis_id", "pos_rank"]].rename(
-        columns={"gsis_id": "player_id", "pos_rank": "depth_chart_rank"}
+    # A handful of depth chart rows have no gsis_id crosswalk at all (still
+    # NaN) - merging on player_id without dropping those first would match
+    # every NaN-id board row (mostly UDFA rookies) against every one of
+    # them, silently fanning each into N duplicate board rows.
+    depth = (
+        depth_chart[["gsis_id", "pos_rank"]]
+        .dropna(subset=["gsis_id"])
+        .rename(columns={"gsis_id": "player_id", "pos_rank": "depth_chart_rank"})
     )
     board = board.merge(depth, on="player_id", how="left")
 
@@ -241,6 +248,12 @@ def main() -> None:
     out_path = OUTPUT_DIR / f"draft_rankings_{args.draft_season}_{args.scoring}.csv"
     board.to_csv(out_path, index=False)
     print(f"Wrote {len(board):,} ranked players -> {out_path}")
+
+    print("Building team offense projection summary...")
+    team_offense = build_team_offense_summary(board).round(2)
+    team_out_path = OUTPUT_DIR / f"team_offense_projection_{args.draft_season}_{args.scoring}.csv"
+    team_offense.to_csv(team_out_path, index=False)
+    print(f"Wrote {len(team_offense):,} team offense projections -> {team_out_path}")
 
 
 if __name__ == "__main__":

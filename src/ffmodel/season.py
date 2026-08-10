@@ -1142,3 +1142,22 @@ def compute_vbd(
     board["replacement_points"] = board["position"].map(replacement_points)
     board["vbd"] = board["total_points_pred"] - board["replacement_points"]
     return board
+
+
+def build_team_offense_summary(board: pd.DataFrame, games: int = 17) -> pd.DataFrame:
+    """Roll the final per-player draft board up to a team-level 2026 offense
+    projection: total projected fantasy points across every rostered
+    QB/RB/WR/TE, and the same total expressed as points-per-game.
+
+    This is a straight aggregation of the SAME per-player predictions
+    already on the board (each player's own total_points_pred already
+    reflects our estimate of their realistic role/games, so a low-usage
+    backup contributes little and doesn't need to be filtered out by hand)
+    - not a separately trained model. Meant as a "which offenses project
+    best/worst in fantasy-point terms for 2026" summary, not a play-calling
+    or real-world scoring projection.
+    """
+    skill = board[board["position"].isin(["QB", "RB", "WR", "TE"])]
+    summary = skill.groupby("team")["total_points_pred"].sum().reset_index(name="team_total_points_pred")
+    summary["team_ppg_pred"] = summary["team_total_points_pred"] / games
+    return summary.sort_values("team_ppg_pred", ascending=False).reset_index(drop=True)

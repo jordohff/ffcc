@@ -765,3 +765,30 @@ Oscar Delp) appear as 12 duplicate rows each in the board, all with deeply negat
 irrelevant for drafting) - pre-existing, unrelated to this round's changes, worth a real fix later but
 not touched here.
 
+
+
+### 2026-08-09 â€” Team offense projection summary, and a real duplicate-row bug it caught
+
+Added `build_team_offense_summary` (season.py): rolls the final per-player board up to one row per
+team - total projected fantasy points across every rostered QB/RB/WR/TE, plus the same total as
+points-per-game (total / 17). A straight aggregation of predictions already on the board (each
+player's own total_points_pred already reflects their realistic role, so low-usage backups
+contribute little without needing to be filtered out by hand), not a separately trained model.
+Written to `output/draft_rankings/team_offense_projection_{season}_{scoring}.csv` alongside the
+existing player board. 2026 top offenses in half-PPR fantasy-point terms: LA (92.2 ppg), BUF (89.0),
+DEN (88.7), SEA (83.1), PHI (82.8); bottom: MIA (45.7, well below #31 IND at 62.9), GB (58.5), IND.
+
+While building this, found and fixed the exact cause of the 12x-duplicate-row bug flagged as
+unresolved in the previous entry (Carson Beck, Colbie Young, etc.): `current_depth_chart.parquet` has
+12 rows with a null `gsis_id` (players nflverse's live depth-chart feed couldn't crosswalk to a real
+ID), and `board.merge(depth, on="player_id", how="left")` was matching every board row with a null
+`player_id` (the UDFA rookies with no draft-pick gsis_id) against ALL 12 of those null rows - pandas
+merge treats NaN as matching NaN, so a left-side null key fans out across every null key on the right
+rather than failing to match. Fixed by `.dropna(subset=["gsis_id"])` on `depth` before the merge, same
+pattern already used for the Sleeper players merge. Board size dropped from 762 to 685 rows (removed
+exactly 77 = 7 affected players x 11 extra copies each), confirming the fix. Worth remembering
+generally: any `how="left"` merge on this project's `player_id`/`gsis_id` columns needs the
+right-hand table's null-id rows dropped first, since several source tables (depth chart, contract
+history before its own explicit dropna, snap share before its crosswalk) carry a handful of
+unmatched-ID rows and a left key of NaN will silently multiply against all of them.
+
