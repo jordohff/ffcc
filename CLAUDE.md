@@ -697,3 +697,71 @@ rather than oversold. 2026 board: Kyren stays RB6 (VBD 88.92, was 88.68), Corum 
 board (VBD -41.37, was -39.96) - materially unchanged, as expected for a refinement to how an existing
 signal is computed rather than a new signal entirely.
 
+
+
+### 2026-08-09 â€” Strength of schedule as a trained feature, plus a team-code bug it surfaced
+
+Added `sos_pts_allowed_pg` to COMMON_VET_FEATURES (all positions): for each team/season/position, the
+average fantasy points that season's ACTUAL opponents allowed to that position in the PRIOR season,
+weighted naturally by how many times each opponent is actually played (a division rival faced twice
+contributes two rows to the average, not one). Built from three new functions in season.py:
+`compute_defense_strength` (team's own points allowed per game by position, regular season only),
+`compute_strength_of_schedule` (each team's real schedule joined to opponents' prior-season defense
+strength), `add_strength_of_schedule_features` (merge onto a training/prediction table by
+team+season+position). User explicitly chose "trained feature" over "display-only" and "natural
+frequency weighting" over an artificial division-game multiplier.
+
+Unlike snap-share-trend/contract signal (which need the player's own prior-season history), SOS only
+needs team+season+position, so it applies to rookies too - `project_rookies` output already carries
+team/position/season, so rookie_board gets a real SOS merge rather than a hardcoded placeholder.
+
+**Bug found while wiring this up: team codes are NOT consistent across nflreadpy's own tables.**
+`load_schedules`/`load_weekly_stats`/`load_players`(Sleeper) all use the standard modern codes (ARI,
+LA, LAC, LV, ...), but `load_rosters`'s 2026 snapshot specifically returns "AZ" for Arizona (every
+past season still says "ARI"), and `load_draft_picks` uses an entirely different 3-letter scheme
+(GNB, KAN, LVR, LAR, NOR, NWE, SDG/SD, SFO, STL, TAM) plus stale pre-relocation codes (OAK, STL) for
+historical picks. A prior fix (`SLEEPER_TEAM_CODE_FIXES = {"ARI": "AZ", "LAR": "LA"}`) had patched
+this exactly backwards - remapping Sleeper's already-correct "ARI" to match rosters' outlier "AZ",
+rather than fixing rosters to match everyone else. First real-world symptom: every 2026 Arizona
+Cardinals skill player (McBride, Harrison Jr., Wilson, Allgeier) silently got a null SOS, and every
+2026 rookie got a null SOS (their team came from draft_picks' 3-letter codes, which matched nothing).
+
+Fixed at the source in `data.py`: a `TEAM_CODE_FIXES` map normalizes `load_roster_info` and
+`load_draft_pick_capital` output to the standard codes right after pulling, so every downstream
+consumer sees one consistent set. `SLEEPER_TEAM_CODE_FIXES` in season.py corrected to `{"LAR": "LA",
+"OAK": "LV"}` (Sleeper's raw feed already uses "ARI" correctly - no fix needed there). Re-pulled
+rosters.parquet/draft_picks.parquet after the fix. This also means `team_changed`/`new_head_coach`/
+depth-chart merges for Arizona and for any rookie were silently degraded before this fix, not just
+SOS - worth keeping in mind if past Arizona/rookie-specific output ever looked off.
+
+Also moved the SOS merge in build_draft_rankings.py to AFTER `apply_current_team_from_sleeper`
+(rather than relying on the copy computed inside `build_prediction_features`, which necessarily runs
+on the pre-Sleeper-correction team) - a player whose nflverse roster snapshot is stale (e.g. still
+shows an old team after a free-agent signing) now gets SOS for their real, Sleeper-corrected team
+instead of a stale or missing one. Confirmed against the Stefon Diggs case already documented in
+`apply_current_team_from_sleeper`'s docstring (nflverse still shows him on NE, Sleeper correctly has
+WAS) - he now gets WAS's SOS, not NE's or none at all.
+
+Validated with a concrete real example: Las Vegas plays AFC West rivals Denver, Kansas City, and the
+Chargers twice each in 2026, and those three teams were the #1, #5, and #7 toughest run defenses
+(fewest fantasy points allowed to RBs) in 2025 - accordingly LV comes out with the single toughest
+2026 RB strength-of-schedule of any team (19.02 pts allowed/game, next-toughest CAR at 19.20).
+Directionally correct and traceable back to real per-team defensive performance, not an artifact.
+
+Backtest effect was flat: QB 0.735 -> 0.737, RB 0.772 -> 0.772, TE 0.807 -> 0.807, WR 0.796 -> 0.796
+(Spearman rank correlation, 2025 holdout) - reported honestly rather than oversold. SOS is a small,
+second-order signal relative to a player's own opportunity/talent, which is expected; it's kept as a
+trained feature (per the user's choice) on the theory that it should help more in tighter individual
+rankings than it moves aggregate rank-correlation metrics, and because a genuinely bad remaining
+matchup slate (as with LV skill players in 2026) is a real, checkable signal a human drafter would
+also want visible.
+
+Noted but NOT fixed (out of scope for this round, doesn't affect any real draftable player): ~70
+veteran free agents (Tyreek Hill, Nick Chubb, DeAndre Hopkins, etc.) have no current team in EITHER
+nflverse rosters or Sleeper as of 2026-08-09, so they correctly get a null SOS (nothing to compute it
+from) - expected, not a bug. Separately, a handful of very-late-round/UDFA 2026 rookies with no
+gsis_id (Carson Beck, Colbie Young, De'Zhaun Stribling, Deion Burks, Joe Royer, Nicholas Singleton,
+Oscar Delp) appear as 12 duplicate rows each in the board, all with deeply negative VBD (-50 to -224,
+irrelevant for drafting) - pre-existing, unrelated to this round's changes, worth a real fix later but
+not touched here.
+

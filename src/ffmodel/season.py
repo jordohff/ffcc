@@ -69,6 +69,7 @@ COMMON_VET_FEATURES = [
     "new_head_coach",
     "new_hc_prior_team_ppg",
     "cap_percent",
+    "sos_pts_allowed_pg",
 ]
 
 SKILL_VET_FEATURES = COMMON_VET_FEATURES + [
@@ -525,6 +526,82 @@ def compute_team_offensive_output(season_stats: pd.DataFrame, rosters: pd.DataFr
     return with_team.groupby(["team", "season"])["ppg"].mean().reset_index(name="team_offensive_ppg")
 
 
+def compute_defense_strength(enriched_weekly: pd.DataFrame) -> pd.DataFrame:
+    """For every (team, season, position), the average fantasy points that
+    team's DEFENSE allowed per game to that position across the whole
+    regular season - e.g. "the 2025 Broncos allowed 9.2 PPG to opposing
+    RBs." A season-level measure, unlike the weekly model's trailing-5-week
+    version (features.add_matchup_features) - this pipeline projects a
+    whole season, so it needs a whole-season baseline for the opponents,
+    not an in-season rolling one.
+
+    Needs the WEEKLY-grain `opponent_team` field (not in season_stats, which
+    has no notion of a single game's opponent), so this takes the enriched
+    weekly table, not season_stats.
+    """
+    reg = enriched_weekly[enriched_weekly["season_type"] == "REG"]
+    points_allowed_by_week = (
+        reg.groupby(["opponent_team", "season", "week", "position"])["fantasy_points_target"]
+        .sum()
+        .reset_index()
+    )
+    return (
+        points_allowed_by_week.groupby(["opponent_team", "season", "position"])["fantasy_points_target"]
+        .mean()
+        .reset_index()
+        .rename(columns={"opponent_team": "team", "fantasy_points_target": "pts_allowed_pg"})
+    )
+
+
+def compute_strength_of_schedule(schedules: pd.DataFrame, defense_strength: pd.DataFrame) -> pd.DataFrame:
+    """For every team and season, a position-specific strength-of-schedule
+    score: the average points that season's ACTUAL opponents allowed to
+    that position in the PRIOR season (the most recent complete season
+    knowable going into any given season - defense_strength itself has no
+    "future" leakage since it's real historical results, but using the
+    opponent's OWN current-season defense would be circular/unknowable in
+    advance).
+
+    Weighted naturally by how many times each opponent is actually played -
+    a division rival faced twice contributes two rows to the average, not
+    one, correctly reflecting that you really do play them twice.
+
+    Computed for every season present in both `schedules` and
+    `defense_strength` (not just the season being projected), so the model
+    can learn whether SOS actually predicts anything rather than having it
+    applied only at prediction time with no historical grounding.
+    """
+    home = schedules[["season", "home_team", "away_team"]].rename(
+        columns={"home_team": "team", "away_team": "opponent"}
+    )
+    away = schedules[["season", "away_team", "home_team"]].rename(
+        columns={"away_team": "team", "home_team": "opponent"}
+    )
+    matchups = pd.concat([home, away], ignore_index=True)
+
+    prior_defense = defense_strength.rename(columns={"team": "opponent"})
+    prior_defense = prior_defense.assign(season=prior_defense["season"] + 1)
+
+    merged = matchups.merge(prior_defense, on=["opponent", "season"], how="inner")
+    return (
+        merged.groupby(["team", "season", "position"])["pts_allowed_pg"]
+        .mean()
+        .reset_index()
+        .rename(columns={"pts_allowed_pg": "sos_pts_allowed_pg"})
+    )
+
+
+def add_strength_of_schedule_features(table: pd.DataFrame, sos: pd.DataFrame) -> pd.DataFrame:
+    """Merge in `sos_pts_allowed_pg` for the player's own team/season/
+    position - each position can face a very different schedule difficulty
+    even on the same team's slate (a team's opponents might be tough against
+    the run but weak against the pass, for instance), so this is matched on
+    position too, not just team.
+    """
+    table = table.merge(sos, on=["team", "season", "position"], how="left")
+    return table
+
+
 def add_head_coach_features(
     table: pd.DataFrame, coach_history: pd.DataFrame, team_output: pd.DataFrame
 ) -> pd.DataFrame:
@@ -716,6 +793,7 @@ def build_season_training_table(
     schedules: pd.DataFrame,
     snap_share: pd.DataFrame,
     contract_history: pd.DataFrame,
+    sos: pd.DataFrame,
     healthy_season_stats: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build the veteran training table: for each player-season Y where we
@@ -751,6 +829,7 @@ def build_season_training_table(
     table = add_head_coach_features(table, coach_history, team_output)
     table = add_snap_share_trend_features(table, compute_snap_share_trend(snap_share))
     table = add_contract_signal_features(table, contract_history)
+    table = add_strength_of_schedule_features(table, sos)
     return table
 
 
@@ -761,6 +840,7 @@ def build_prediction_features(
     schedules: pd.DataFrame,
     snap_share: pd.DataFrame,
     contract_history: pd.DataFrame,
+    sos: pd.DataFrame,
     healthy_season_stats: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build feature rows for predicting `target_season`, which hasn't been
@@ -791,6 +871,7 @@ def build_prediction_features(
     table = add_head_coach_features(table, coach_history, team_output)
     table = add_snap_share_trend_features(table, compute_snap_share_trend(snap_share))
     table = add_contract_signal_features(table, contract_history)
+    table = add_strength_of_schedule_features(table, sos)
     return table
 
 
@@ -924,7 +1005,7 @@ def estimate_games_played(weighted_games_played: pd.Series, max_games: int = 17)
 # abbreviations for these two teams - normalize to nflverse's convention
 # (used everywhere else in this pipeline) before comparing/using Sleeper's
 # team field, or every Cardinals/Rams player falsely shows up as a "mismatch".
-SLEEPER_TEAM_CODE_FIXES = {"ARI": "AZ", "LAR": "LA"}
+SLEEPER_TEAM_CODE_FIXES = {"LAR": "LA", "OAK": "LV"}
 
 
 def apply_current_team_from_sleeper(board: pd.DataFrame, sleeper_players: pd.DataFrame) -> pd.DataFrame:

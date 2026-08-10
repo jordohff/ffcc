@@ -24,11 +24,14 @@ from ffmodel.season import (
     aggregate_healthy_season_stats,
     aggregate_season_stats,
     add_offensive_coordinator_context,
+    add_strength_of_schedule_features,
     apply_current_team_from_sleeper,
     build_enriched_weekly,
     build_prediction_features,
     build_rookie_training_table,
     build_season_training_table,
+    compute_defense_strength,
+    compute_strength_of_schedule,
     compute_team_offensive_output,
     compute_vbd,
     estimate_games_played,
@@ -118,8 +121,10 @@ def main() -> None:
     enriched = build_enriched_weekly(weekly, routes, ngs, scoring=args.scoring)
     season_stats = aggregate_season_stats(enriched)
     healthy_season_stats = aggregate_healthy_season_stats(enriched, injuries)
+    defense_strength = compute_defense_strength(enriched)
+    sos = compute_strength_of_schedule(schedules, defense_strength)
     training_table = build_season_training_table(
-        season_stats, rosters, schedules, snap_share, contract_history, healthy_season_stats
+        season_stats, rosters, schedules, snap_share, contract_history, sos, healthy_season_stats
     )
 
     print()
@@ -129,7 +134,7 @@ def main() -> None:
     print(f"Fitting final veteran model on all seasons through {args.draft_season - 1}...")
     models = fit_vet_models_by_position(training_table)
     vet_board = build_prediction_features(
-        season_stats, args.draft_season, rosters, schedules, snap_share, contract_history, healthy_season_stats
+        season_stats, args.draft_season, rosters, schedules, snap_share, contract_history, sos, healthy_season_stats
     )
     vet_board["ppg_pred"] = predict_vet_ppg(models, vet_board)
     vet_board["games_est"] = estimate_games_played(vet_board["wavg_games_played"])
@@ -137,7 +142,7 @@ def main() -> None:
     vet_board = vet_board[
         ["player_id", "player_display_name", "position", "team", "age", "team_changed",
          "new_head_coach", "new_hc_prior_team_ppg", "prev_snap_share_trend", "prev_snap_share_level",
-         "cap_percent", "ppg_pred", "games_est", "total_points_pred"]
+         "cap_percent", "sos_pts_allowed_pg", "ppg_pred", "games_est", "total_points_pred"]
     ]
     vet_board["is_rookie"] = 0
     print(f"  {len(vet_board):,} returning players projected")
@@ -162,11 +167,16 @@ def main() -> None:
     # Rookie contracts are small/not yet in the contract data source - 0 is
     # a reasonable placeholder (no established veteran-scale investment yet).
     rookie_board["cap_percent"] = 0
+    # Unlike snap share/contract history, SOS only needs (team, season,
+    # position) - not the player's own prior-season history - so it applies
+    # to rookies just as well as veterans (rookies already have a team from
+    # their actual draft slot and a season = args.draft_season).
+    rookie_board = add_strength_of_schedule_features(rookie_board, sos)
     rookie_board["is_rookie"] = 1
     rookie_board = rookie_board[
         ["player_id", "player_display_name", "position", "team", "age", "team_changed",
          "new_head_coach", "new_hc_prior_team_ppg", "prev_snap_share_trend", "prev_snap_share_level",
-         "cap_percent", "ppg_pred", "games_est", "total_points_pred", "is_rookie"]
+         "cap_percent", "sos_pts_allowed_pg", "ppg_pred", "games_est", "total_points_pred", "is_rookie"]
     ]
     print(f"  {len(rookie_board):,} rookies projected")
 
@@ -178,6 +188,15 @@ def main() -> None:
     n_mismatch = int(board["team_mismatch"].sum())
     if n_mismatch:
         print(f"  {n_mismatch} players had a stale nflverse team vs. Sleeper's current team - using Sleeper's")
+
+    # sos_pts_allowed_pg above was computed from the pre-Sleeper (nflverse)
+    # team, so a player whose nflverse team was stale (e.g. still showing
+    # their old team after an offseason signing) would get their OLD team's
+    # schedule difficulty, or none at all if nflverse had no current-season
+    # row for them. Recompute now that `team` reflects Sleeper's fresher info.
+    board["season"] = args.draft_season
+    board = board.drop(columns=["sos_pts_allowed_pg"])
+    board = add_strength_of_schedule_features(board, sos)
 
     print("Merging current roster status and depth chart context...")
     status = (

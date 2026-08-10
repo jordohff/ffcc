@@ -15,6 +15,32 @@ FANTASY_POSITIONS = {"QB", "RB", "WR", "TE"}
 
 SLEEPER_PLAYERS_URL = "https://api.sleeper.app/v1/players/nfl"
 
+# Canonical team codes are whatever load_weekly_stats/load_schedules use
+# (ARI, LA, LAC, LV, ...) since those are the tables everything else here
+# gets joined against. A couple of other nflreadpy sources drift from that:
+# load_rosters started returning "AZ" for Arizona starting with the 2026
+# snapshot (still "ARI" in every past season), and load_draft_picks uses an
+# entirely different 3-letter scheme (GNB, KAN, LVR, ...) plus some
+# pre-relocation codes (OAK/SD/STL) for historical franchises. Left
+# unnormalized, joins against schedules/weekly stats for the affected teams
+# silently drop rows - see CLAUDE.md for the Arizona SOS case that surfaced
+# this.
+TEAM_CODE_FIXES = {
+    "AZ": "ARI",
+    "GNB": "GB",
+    "KAN": "KC",
+    "LAR": "LA",
+    "LVR": "LV",
+    "NOR": "NO",
+    "NWE": "NE",
+    "OAK": "LV",
+    "SDG": "LAC",
+    "SD": "LAC",
+    "SFO": "SF",
+    "STL": "LA",
+    "TAM": "TB",
+}
+
 
 def load_weekly_stats(seasons: list[int]) -> pd.DataFrame:
     """Pull weekly player stat lines for the given seasons from nflreadpy.
@@ -127,7 +153,9 @@ def load_roster_info(seasons: list[int]) -> pd.DataFrame:
     rosters = nfl.load_rosters(seasons).select(
         ["season", "gsis_id", "team", "position", "status", "birth_date", "years_exp"]
     )
-    return rosters.to_pandas()
+    df = rosters.to_pandas()
+    df["team"] = df["team"].replace(TEAM_CODE_FIXES)
+    return df
 
 
 def load_draft_pick_capital(seasons: list[int]) -> pd.DataFrame:
@@ -145,7 +173,9 @@ def load_draft_pick_capital(seasons: list[int]) -> pd.DataFrame:
     picks = nfl.load_draft_picks(seasons).select(
         ["season", "round", "pick", "team", "position", "gsis_id", "pfr_player_name"]
     )
-    return picks.to_pandas()
+    df = picks.to_pandas()
+    df["team"] = df["team"].replace(TEAM_CODE_FIXES)
+    return df
 
 
 def load_current_depth_chart(season: int) -> pd.DataFrame:
