@@ -982,10 +982,18 @@ def project_rookies(current_draft_picks: pd.DataFrame, rookie_averages: pd.DataF
     return picks
 
 
-def estimate_games_played(weighted_games_played: pd.Series, max_games: int = 17) -> pd.Series:
+RECENT_INJURY_THRESHOLD = 10
+BOUNCE_BACK_INTERCEPT = -0.58
+BOUNCE_BACK_SLOPE = 0.40
+
+
+def estimate_games_played(
+    weighted_games_played: pd.Series, prev_games_played: pd.Series, max_games: int = 17
+) -> pd.Series:
     """Durability estimate: recency-weighted average games played over the
     last few seasons (see HISTORY_WEIGHTS/add_weighted_history_features),
-    capped at a full season.
+    capped at a full season, plus a bounce-back correction for a player
+    coming off a recently shortened season.
 
     Uses multi-year history rather than just last season, so a player with a
     genuine injury-proneness PATTERN (e.g. 17/10/12 games the last 3 years)
@@ -997,8 +1005,44 @@ def estimate_games_played(weighted_games_played: pd.Series, max_games: int = 17)
     matters more for a durability estimate than squeezing out a bit more
     accuracy from a black-box model on a genuinely hard problem (in-season
     injuries are close to unpredictable in advance).
+
+    Bounce-back correction: prompted by Christian McCaffrey dropping out of
+    the 2026 top-12 overall, then testing (not assuming) whether recent
+    injury history should count AGAINST a player, per the user's explicit
+    "draft for upside and situation, not scared of injuries" framing.
+    Walk-forward tested (predict every season 2018-2025 using only data
+    from before it) whether a plain recency-weighted games average is
+    biased for players coming off a shortened season (prev_games_played <
+    RECENT_INJURY_THRESHOLD). It is - badly - and in the OPPOSITE direction
+    caution would suggest: calibrated the correction on 2018-2022 seasons,
+    validated out-of-sample on 2023-2025, and the plain average
+    underestimated this cohort's actual next-season games by +1.28 on
+    average (well-centered at -0.13 after correcting). This held whether
+    the recent injury was severe (0-4 games played: +2.60 underestimate) or
+    moderate (5-9 games: +0.51), and whether it was a one-off (+1-year
+    history clean: -0.13, i.e. already fine) or part of a chronic pattern
+    (two bad seasons in a row: +1.32, underestimated even MORE) - there was
+    no cut of this data where discounting further was justified. Final
+    correction constants (BOUNCE_BACK_INTERCEPT/SLOPE) are refit on the
+    full 2018-2025 pooled data after that validation.
+
+    Deliberately does NOT extend to an OLDER injury that's now 2 seasons
+    back with a full healthy season in between (McCaffrey's actual 2026
+    setup: 2025 healthy, 2024's Achilles 2 seasons back still pulling his
+    3-year wavg_games_played down) - that pattern was tested with the same
+    calibrate/validate split and showed no statistically significant bias
+    (validation mean -0.36, p=0.57), so no correction is applied there.
+    McCaffrey's 2026 games_est is still discounted by 2024 sitting at 30%
+    recency weight - the data doesn't currently support overriding that,
+    and inventing a fix just to move one specific player would repeat the
+    mistake already made and reverted once this project (the age x elite
+    interaction term, fit on too sparse a slice of data to trust).
     """
-    return weighted_games_played.clip(upper=max_games)
+    games_est = weighted_games_played.clip(upper=max_games)
+    games_missed = (RECENT_INJURY_THRESHOLD - prev_games_played).clip(lower=0)
+    correction = (BOUNCE_BACK_INTERCEPT + BOUNCE_BACK_SLOPE * games_missed).clip(lower=0)
+    correction = correction.where(prev_games_played < RECENT_INJURY_THRESHOLD, 0)
+    return (games_est + correction).clip(upper=max_games)
 
 
 # Sleeper and nflverse otherwise agree on team codes, but use different

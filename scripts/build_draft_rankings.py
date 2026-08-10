@@ -85,7 +85,7 @@ def backtest(training_table: pd.DataFrame, test_season: int, top_n: int) -> None
 
     models = fit_vet_models_by_position(train)
     test["ppg_pred"] = predict_vet_ppg(models, test)
-    test["games_est"] = estimate_games_played(test["wavg_games_played"])
+    test["games_est"] = estimate_games_played(test["wavg_games_played"], test["prev_games_played"])
     test["total_points_pred"] = test["ppg_pred"] * test["games_est"]
     test["total_points"] = test["ppg"] * test["games_played"]
 
@@ -138,7 +138,7 @@ def main() -> None:
         season_stats, args.draft_season, rosters, schedules, snap_share, contract_history, sos, healthy_season_stats
     )
     vet_board["ppg_pred"] = predict_vet_ppg(models, vet_board)
-    vet_board["games_est"] = estimate_games_played(vet_board["wavg_games_played"])
+    vet_board["games_est"] = estimate_games_played(vet_board["wavg_games_played"], vet_board["prev_games_played"])
     vet_board["total_points_pred"] = vet_board["ppg_pred"] * vet_board["games_est"]
     vet_board = vet_board[
         ["player_id", "player_display_name", "position", "team", "age", "team_changed",

@@ -792,3 +792,103 @@ right-hand table's null-id rows dropped first, since several source tables (dept
 history before its own explicit dropna, snap share before its crosswalk) carry a handful of
 unmatched-ID rows and a left key of NaN will silently multiply against all of them.
 
+
+
+### 2026-08-09 â€” VBD accuracy research (item #3: risk weighting) - null result on discounting, real fix on durability bias
+
+User asked for research on how VBD should be weighted more accurately, in three prioritized parts:
+#3 risk/variance adjustment, #2 man-games replacement depth, #1 empirical flex-slot allocation.
+Started with #3. This became a long, honest investigation that ended up rejecting the original idea
+(discount VBD for volatile players) and shipping a different, better-supported fix instead.
+
+**Tested whether scoring-rate volatility predicts a shortfall vs. our own point estimate** (i.e. is a
+"risk-adjusted VBD" discount actually justified, or would it just punish boom players). Computed a
+combined coefficient-of-variation score (games played + ppg, trailing up to 4 seasons) and correlated
+it against 2025 backtest residuals (actual ppg - predicted ppg): essentially zero (Pearson -0.03,
+Spearman -0.01), no clean pattern by quintile either. Christian McCaffrey was the concrete
+counterexample: one of the highest volatility scores in the whole 2025 test set, yet beat his
+projection by +8.3 ppg. **Conclusion: a blanket volatility discount is not empirically supported and
+would misprice exactly the boom-or-bust players a risk-seeking drafter wants** - this directly matches
+the user's explicit "we don't draft scared, we draft for upside" framing, now with data behind it, not
+just philosophy. No VBD discount was shipped.
+
+**User specifically flagged Christian McCaffrey dropping out of the 2026 top 12 and asked for
+walk-forward backtesting (not a single holdout) to confirm whether this is right.** Built a proper
+walk-forward backtest (train on everything before season T, predict T, for every T from 2018-2025) -
+first time this project has validated across many seasons instead of one. Aggregate model stability
+looked fine (RB Spearman 0.704 +/- 0.048 across 8 seasons). But pulling McCaffrey's predicted-vs-actual
+RB rank in every testable season surfaced a real, repeated pattern:
+
+| test season | predicted RB rank | actual RB rank | context |
+|---|---|---|---|
+| 2018 | 11 | 2 | underrated |
+| 2019 | 3 | 1 | close |
+| 2020 | 1 | 44 | overrated (unforeseeable injury) |
+| 2021 | 11 | 34 | mild overrate |
+| **2022** | **30** | **2** | **massively underrated, coming off a down year** |
+| 2023 | 8 | 1 | underrated |
+| 2024 | 1 | 63 | overrated (unforeseeable Achilles/PCL) |
+| **2025** | **27** | **1** | **massively underrated, coming off the 2024 injury year** |
+
+Two of eight testable seasons show the model burying him at RB27-30 right after a down/injury year,
+both times followed by a #1-2 overall finish. Not noise - a repeatable pattern in exactly the scenario
+the user asked about.
+
+**User's follow-up (mid-investigation): explicitly asked to also test the injury-risk hypothesis
+itself, warning against "drafting scared."** Ran the actual test rather than assuming either direction:
+pooled `games_resid = actual_games_played - games_est` across all 8 walk-forward seasons (leak-safe -
+games_est built only from data before the target season) and checked whether players coming off a
+short season (`prev_games_played < 10`) are UNDER- or OVER-estimated by the current heuristic:
+
+- Recent-injury cohort (n=1,271 pooled player-seasons): mean games_resid = **+1.37** (underestimated -
+  they play MORE than the model expects)
+- Rest of the population (n=2,242): mean games_resid = -1.50 (mildly overestimated, normal unpredictable
+  in-season risk that hits everyone)
+- Split further: chronic (bad season AND the one before it) = **+1.32** underestimate; one-off (bad
+  season only) = -0.13 (already fine). Severity: near-wipeout (0-4 games) = **+2.60** underestimate;
+  moderate (5-9 games) = +0.51.
+
+Every cut of this pointed the same direction: **the model currently discounts recent-injury players
+MORE than the data supports, and the miscalculation gets WORSE (not better) the more severe/chronic the
+injury history looks** - the opposite of what "draft scared" intuition would predict. This is now data,
+not just philosophy, backing the user's stated draft strategy.
+
+**Shipped fix**: `estimate_games_played` (season.py) now adds a bounded bounce-back correction when
+`prev_games_played < RECENT_INJURY_THRESHOLD` (10), sized by how many games were missed:
+`correction = max(0, BOUNCE_BACK_INTERCEPT + BOUNCE_BACK_SLOPE * games_missed)`, clipped so it only ever
+adds durability credit, never subtracts. Calibrated on 2018-2022 walk-forward data, validated
+out-of-sample on 2023-2025 (never seen during calibration) before shipping - same discipline as the
+touch-volume-cliff research: recent-injury cohort mean games_resid went from +1.28 (biased) to -0.13
+(well-centered) on validation data, and the downstream backtest was flat-to-positive across every
+position/season tested, no regressions. Final constants refit on the full 2018-2025 pooled dataset
+after validation confirmed the approach generalizes. 2025 holdout backtest (the one used for the
+board's headline numbers): QB 0.737->0.722 (small give-back), RB 0.772->0.779, TE 0.807->0.806 (flat),
+WR 0.796->0.803 - net positive.
+
+Concrete 2026 board effect: real, traceable, sensible beneficiaries - Tyreek Hill (2025 ACL tear),
+Malik Nabers, Jayden Daniels, Joe Burrow (2025 calf), Garrett Wilson, Anthony Richardson, Austin Ekeler,
+James Conner, Najee Harris all get bounded durability credit for a real 2025 injury-shortened season.
+**Christian McCaffrey's own 2026 number was deliberately left unchanged** - his 2025 was a full healthy
+17-game season, so `prev_games_played = 17` and the correction correctly does not fire for him at all;
+his games_est (12.9) is still being pulled down by 2024's 4-game Achilles/PCL season sitting at 30%
+recency weight, two seasons back rather than immediately prior.
+
+**Explicitly tested and rejected fixing THAT pattern too** (old injury 2 seasons back + healthy season
+immediately before - McCaffrey's exact current setup), rather than inventing a fix just to move one
+named player. Same calibrate/validate methodology: full pooled cohort n=153, calibration-set mean
+games_resid = -0.24 (t-test p=0.58), validation-set mean = -0.36 (p=0.57) - both statistically
+indistinguishable from zero, with huge variance (std ~4.2-4.9 games) either way. **No correction shipped
+for this pattern** - the data doesn't support one, and building one anyway would repeat the exact
+mistake already made and reverted earlier in this project (the age x elite-interaction term, fit on too
+sparse a data intersection to trust - see the 2026-08-09 age-cliff entry). McCaffrey stays at RB10 /
+#15 overall (VBD 74.38) on the current board; this is a live, second-guessable modeling limitation, not
+a bug, and is honestly not improvable with the data currently available.
+
+**Net conclusion on item #3**: the "risk-adjusted VBD" idea as originally scoped was rejected by
+evidence (twice - both for scoring-rate volatility and for the McCaffrey-specific old-injury pattern),
+which is itself the correct, honest outcome of "let's check before we ship." The one real, generalizable
+bias that DID survive out-of-sample validation (recent-injury durability underestimation) was fixed at
+its actual mechanical source (`estimate_games_played`), not bolted on as a VBD-level discount - a
+narrower, more defensible, better-tested change than what was originally proposed. Next: #2 (man-games
+replacement depth) and #1 (empirical flex-slot allocation), per the user's stated priority order.
+
