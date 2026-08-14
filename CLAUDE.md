@@ -1297,3 +1297,106 @@ cap and fixed the Jeremiyah Love overrate), (3) weekly opponent-adjusted distrib
 three reuse the same underlying infrastructure (project_team_pace, defense_strength/SOS) rather than being three
 disconnected features.
 
+
+
+### 2026-08-13 â€” FantasyPros re-validation (post-session-fixes) + a real, 22%-of-players Sleeper data bug found and fixed
+
+Closed the loop on this session's changes (man-games/flex VBD, rookie curve, pace-aware opportunity ceiling,
+weekly projections) by re-comparing the board against FantasyPros' live PPR consensus (`load_ff_rankings()`,
+`ppr-cheatsheets.php`), regenerated in matching full-PPR scoring for a clean apples-to-apples check (the
+earlier comparisons this project used were half-PPR vs. a PPR source). User asked to widen the window from the
+original top-15 spot check to the full top 250.
+
+**Result: top-250 overlap 203/250 (81%), Spearman rank correlation 0.815** (n=405 matched players, after
+position-filtering FP's list to QB/RB/WR/TE - it also covers K/DST, which this project doesn't model - and
+name-normalizing Jr./Sr./III suffixes, both of which were inflating the raw mismatch count with false
+positives). Solid overall alignment, and directionally consistent with the earlier top-15-only check from
+before this session's work (12/15).
+
+**Two systematic patterns surfaced, not yet investigated further:**
+1. We meaningfully OVER-rate backup-tier tight ends relative to consensus - 11 of the top 15 "we rank much
+   higher than FP" outliers are TE2/TE3-caliber players (Cole Kmet, Tommy Tremble, Dawson Knox, Josh Oliver,
+   Adam Trautman, Noah Fant, Austin Hooper, and others), all landing 150-240 ranks above where FP has them.
+2. We meaningfully UNDER-rate a set of aging/injury-history veterans relative to consensus - Najee Harris,
+   Tyreek Hill, Keenan Allen, Nick Chubb, Darren Waller, Kareem Hunt, and others rank 250-400+ spots below FP.
+
+Neither pattern has been root-caused yet - flagged as open follow-up items, not yet diagnosed the way the Love
+case was.
+
+**Real bug found and fixed while investigating a specific outlier (Kyler Murray, QB32/-130 VBD despite being a
+real, current starting QB per the user)**: Sleeper's own `gsis_id` field has stray leading/trailing whitespace
+on a real chunk of rows - confirmed 866 of 3,893 non-null values (22%) affected, via Murray's own row coming
+back as `" 00-0035228"` instead of `"00-0035228"`. This silently broke `apply_current_team_from_sleeper`'s merge
+for roughly a fifth of all players, with no visible error - a left-merge just finds no match and leaves every
+Sleeper-sourced column (team override, current injury status, live depth-chart order) null, silently falling
+back to nflverse's (potentially stale) data instead. Fixed at the source in `fetch_sleeper_players` (data.py):
+strip `gsis_id` right after pulling, so every downstream consumer gets the clean value automatically. Re-pulled
+`sleeper_players.parquet` and confirmed Murray's `sleeper_team` now correctly resolves and matches (both
+sources agree: MIN).
+
+**Murray's own low ranking, once the team bug was ruled out, turned out to be a real, mechanically-correct (if
+harsh) reflection of genuine data, not a second bug**: his actual games-played history is 17 (2024) / 8 (2023,
+not shown as adjacent) / 5 (2025) - a real, erratic multi-year pattern, not a single clean injury year. The
+existing bounce-back correction (see estimate_games_played) DOES fire for him (prev_games_played=5 < 10), but
+that correction was calibrated on "one bad recent season" patterns, not this specific zigzag shape (healthy,
+then hurt, with a prior injury 2 seasons back too). This is a genuinely untested pattern, distinct from both the
+"recent injury" cohort (fixed, validated) and the McCaffrey "old injury 2-back + healthy since" cohort
+(explicitly tested and rejected for further correction) - flagged as an open research question, NOT hand-fixed
+for one player, matching this project's hard-learned lesson from the reverted age x elite interaction term.
+
+Next: continue into the offensive line model (rankings/continuity/strength + coaching) per the user's request,
+and revisit the TE-overrating / veteran-underrating patterns above as time allows.
+
+
+
+### 2026-08-13 â€” offensive line model: real public proxies exist, tested rigorously, genuine null result
+
+User asked for a model incorporating offensive line rankings, continuity, strength, and coaching. Investigated
+data availability first (matching this project's established practice - already rejected true scheme
+classification for the same reason once before).
+
+**Real, legitimate, public proxies DO exist** (found via nflreadpy, no scraping, not paywalled PFF grades):
+- `load_pfr_advstats(stat_type="pass")`: `times_pressured`/`times_pressured_pct` per QB - a real, widely-used
+  public stand-in for pass-block quality. Available 2018+.
+- `load_pfr_advstats(stat_type="rush")`: `rushing_yards_before_contact` per rusher - room created before the
+  runner is touched, distinct from the runner's own after-contact ability. Available 2018+.
+- `load_snap_counts()` filtered to T/G/C/OL positions - lets you identify a team's top-5-snap offensive
+  linemen each season and measure year-over-year continuity without needing an explicit starter flag.
+
+Built team-season aggregates: `ol_pressure_rate_allowed` (sum of pressures across every QB who played for a
+team, divided by the team's real pass-play volume from `load_team_play_volume` - not a naive average of each
+QB's own rate, which would let a backup's small sample count as much as the starter's), `ol_yards_before_contact_pc`,
+and `ol_continuity` (fraction of this season's top-5 O-line snap leaders who were also top-5 for the same team
+last season).
+
+**Tested rigorously before wiring anything in - genuine null result, not a proxy-construction problem.** Checked
+both same-season (no leak-safety needed, tests whether the metric relates to fantasy output AT ALL) and lagged
+(prior-season metric predicting next season, the leak-safe form actually usable for projection):
+- Pass protection -> QB ppg: same-season r=-0.000 (p=0.999), lagged r=0.171 (p=0.011, but WRONG DIRECTION - more
+  pressure allowed correlating with HIGHER QB fantasy output, more plausibly a confound with mobile/scrambling
+  QBs than a real causal signal).
+- Pass protection -> WR/TE ppg: no signal either season framing.
+- Run blocking -> RB ppg: same-season r=0.089 (p=0.158, not significant), lagged r=0.034 (p=0.618).
+- O-line continuity -> QB/RB ppg: no signal, same-season or lagged.
+
+The metrics themselves check out as sane (not a construction bug): 2025 pressure rates ranged 11-35% (real NFL
+range), best/worst teams matched real reputations (Pittsburgh/Tampa Bay best pass protection, Cleveland/
+Chargers worst); yards-before-contact ranged 1.4-3.7/carry, also a plausible real range.
+
+**Conclusion, and why**: O-line quality (as proxied by these real, public metrics) doesn't show a clean
+statistical relationship with FANTASY point totals, even in the most favorable same-season framing. Plausible
+reason: fantasy PPG is dominated by usage/opportunity/scoring-variance (already captured by this pipeline's
+existing volume/share features) far more than by blocking efficiency - O-line quality may genuinely matter for
+real football outcomes (game results, protecting a real investment) without cleanly moving fantasy point
+totals at a team-season level of aggregation. User explicitly asked to test further angles (efficiency stats
+instead of PPG, weekly-grain instead of season-grain) as possible next steps if this gets revisited, but chose
+to accept the null result and stop here for now rather than keep chasing it without a new hypothesis.
+
+**Not shipped, code removed rather than left as dead weight**: `compute_ol_pass_protection`,
+`compute_ol_run_blocking`, `compute_ol_continuity` (season.py) and `load_ol_snap_counts`,
+`load_pass_protection_stats`, `load_run_blocking_stats` (data.py) were built, validated, and then REMOVED after
+the null result - not wired to anything, so left in place they'd be exactly the kind of confusing no-op landmine
+already avoided once this project (see the reverted `QB_STREAMING_DEPTH_MULTIPLIER`). This entry is the
+research record; the coaching-continuity extension to O-line (originally scoped as a follow-up) was not pursued
+since it would have been built on top of a null-result foundation.
+

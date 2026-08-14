@@ -327,10 +327,23 @@ def fetch_sleeper_players() -> pd.DataFrame:
     Sleeper's docs ask consumers to cache this locally rather than fetch it
     often, since the full list rarely changes. The caller is expected to save
     the result and reuse it (see scripts/pull_data.py).
+
+    Sleeper's own `gsis_id` field has stray leading/trailing whitespace on a
+    real chunk of rows (866 of 3,893 non-null values, ~22%) - confirmed via
+    Kyler Murray's row, where `gsis_id` came back as `" 00-0035228"` instead
+    of `"00-0035228"`. This silently broke every downstream merge keyed on
+    gsis_id (apply_current_team_from_sleeper's team override, current injury
+    status, live depth-chart order) for roughly a fifth of players, with no
+    error - a left-merge just quietly finds no match and leaves the Sleeper
+    columns null, falling back to nflverse's (potentially stale) data
+    without any visible sign anything went wrong. Stripped here, at the
+    source, so every consumer gets the clean value automatically.
     """
     resp = requests.get(SLEEPER_PLAYERS_URL, timeout=30)
     resp.raise_for_status()
     players = resp.json()  # dict keyed by Sleeper's internal player_id
     df = pd.DataFrame.from_dict(players, orient="index")
     df.index.name = "sleeper_player_id"
-    return df.reset_index()
+    df = df.reset_index()
+    df["gsis_id"] = df["gsis_id"].str.strip()
+    return df
