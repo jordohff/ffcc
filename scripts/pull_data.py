@@ -23,6 +23,7 @@ from ffmodel.data import (
     load_roster_info,
     load_schedules,
     load_snap_share,
+    load_team_play_volume,
     load_weekly_stats,
 )
 
@@ -157,6 +158,12 @@ def main() -> None:
         "contract_history.parquet",
         "contract history (year-by-year cap details, full career)",
         load_contract_history,
+        args.force,
+    )
+    _pull_and_cache(
+        "team_play_volume.parquet",
+        f"team offensive play volume for seasons {args.seasons}",
+        lambda: load_team_play_volume(args.seasons),
         args.force,
     )
 

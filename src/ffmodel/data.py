@@ -99,6 +99,45 @@ def load_pbp_dropbacks(seasons: list[int]) -> pd.DataFrame:
     return pbp.to_pandas()
 
 
+def load_team_play_volume(seasons: list[int]) -> pd.DataFrame:
+    """Pull team-level offensive play volume per game: total offensive plays
+    (pass attempts + sacks + scrambles + rush attempts, i.e. every play that
+    consumes a real offensive down - excludes kickoffs/punts/FGs/PATs/no-plays),
+    split into pass plays vs. rush plays, aggregated to one row per team per
+    season per game.
+
+    This is the foundation for a "plays per game x player's share of that
+    volume" opportunity model (see compute_team_pace in season.py) - the
+    current draft-rankings pipeline fits every player's production
+    independently, with nothing tying a team's players together, which lets
+    physically-impossible team totals slip through (see
+    apply_team_opportunity_cap's docstring for the concrete case that
+    surfaced this). Aggregated down to team/game immediately rather than
+    caching full play-level detail - only the per-game play counts are
+    needed here, and the full nflverse pbp file has 300+ columns most of
+    which aren't relevant to this.
+    """
+    import nflreadpy as nfl
+
+    pbp = nfl.load_pbp(seasons).select(
+        ["game_id", "season", "week", "season_type", "posteam", "rush_attempt", "pass_attempt"]
+    )
+    df = pbp.to_pandas()
+    df = df[df["season_type"] == "REG"]
+    df = df[(df["rush_attempt"] == 1) | (df["pass_attempt"] == 1)]
+    df = df.dropna(subset=["posteam"])
+
+    per_game = (
+        df.groupby(["posteam", "season", "week", "game_id"])
+        .agg(pass_plays=("pass_attempt", "sum"), rush_plays=("rush_attempt", "sum"))
+        .reset_index()
+        .rename(columns={"posteam": "team"})
+    )
+    per_game["total_plays"] = per_game["pass_plays"] + per_game["rush_plays"]
+    per_game["team"] = per_game["team"].replace(TEAM_CODE_FIXES)
+    return per_game
+
+
 def load_participation(seasons: list[int]) -> pd.DataFrame:
     """Pull play-level participation data: which offensive players (by
     gsis_id) were on the field for each play.
@@ -167,15 +206,42 @@ def load_draft_pick_capital(seasons: list[int]) -> pd.DataFrame:
     incoming rookie class - `seasons` should include the current year, whose
     draft has already happened by the time this project cares about it
     (NFL draft is held every April, well before fantasy drafts in August).
+
+    load_draft_picks()' own `gsis_id` column is NOT a real gsis_id for the
+    most recent draft class: nflreadpy hasn't back-filled it into the
+    league's official ID system yet by draft season's end (that seems to
+    happen once a player is actually in the league's official stats
+    pipeline). Confirmed this affects 100% of the 2026 class (257/257 rows
+    fail to match the standard "00-XXXXXXX" gsis format) - it's not a
+    handful of edge cases. This silently broke every merge keyed on
+    player_id for a true rookie (Sleeper roster info, current depth chart,
+    strength-of-schedule) and was the root cause of every 2026 rookie
+    showing a null depth_chart_rank on the board despite depth chart data
+    for them existing. Fixed by crosswalking through `pfr_player_id`
+    (a real PFR ID, e.g. "LoveJe00" - present and correct even for rookies)
+    against load_players()' own pfr_id<->gsis_id mapping, same crosswalk
+    pattern already used in load_snap_share. Recovers a real gsis_id for
+    231/257 (90%) of the 2026 class - the rest are mostly non-skill
+    positions (OL/DL/LB/DB) with no fantasy relevance; falls back to the
+    original (broken) id for anyone the crosswalk can't resolve rather than
+    dropping them, so non-fantasy positions and truly unmapped players don't
+    silently disappear from the table.
     """
     import nflreadpy as nfl
 
     picks = nfl.load_draft_picks(seasons).select(
-        ["season", "round", "pick", "team", "position", "gsis_id", "pfr_player_name"]
+        ["season", "round", "pick", "team", "position", "gsis_id", "pfr_player_id", "pfr_player_name"]
     )
     df = picks.to_pandas()
     df["team"] = df["team"].replace(TEAM_CODE_FIXES)
-    return df
+
+    crosswalk = (
+        nfl.load_players().select(["gsis_id", "pfr_id"]).drop_nulls("pfr_id").to_pandas()
+        .rename(columns={"gsis_id": "real_gsis_id", "pfr_id": "pfr_player_id"})
+    )
+    df = df.merge(crosswalk, on="pfr_player_id", how="left")
+    df["gsis_id"] = df["real_gsis_id"].fillna(df["gsis_id"])
+    return df.drop(columns=["pfr_player_id", "real_gsis_id"])
 
 
 def load_current_depth_chart(season: int) -> pd.DataFrame:

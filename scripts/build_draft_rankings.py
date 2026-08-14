@@ -24,23 +24,33 @@ from ffmodel.season import (
     aggregate_healthy_season_stats,
     aggregate_season_stats,
     add_offensive_coordinator_context,
+    add_rookie_outcome_range,
     add_strength_of_schedule_features,
     apply_current_team_from_sleeper,
     build_enriched_weekly,
+    build_head_coach_history,
     build_prediction_features,
     build_rookie_training_table,
+    build_weekly_matchups,
+    apply_team_opportunity_cap,
     build_season_training_table,
     build_team_offense_summary,
     compute_defense_strength,
+    compute_efficiency_ceiling,
+    compute_rookie_outcome_range,
     compute_strength_of_schedule,
     compute_team_offensive_output,
+    compute_team_position_ceiling,
+    compute_team_season_pace,
     compute_vbd,
     estimate_games_played,
     evaluate_rankings,
-    fit_rookie_averages,
+    fit_rookie_curve,
     fit_vet_models_by_position,
     predict_vet_ppg,
     project_rookies,
+    project_team_pace,
+    project_weekly_points,
 )
 
 RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
@@ -65,9 +75,10 @@ def load_raw():
     schedules = pd.read_parquet(RAW_DIR / "schedules.parquet")
     snap_share = pd.read_parquet(RAW_DIR / "snap_share.parquet")
     contract_history = pd.read_parquet(RAW_DIR / "contract_history.parquet")
+    play_volume = pd.read_parquet(RAW_DIR / "team_play_volume.parquet")
     return (
         weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart,
-        sleeper_players, injuries, schedules, snap_share, contract_history,
+        sleeper_players, injuries, schedules, snap_share, contract_history, play_volume,
     )
 
 
@@ -114,7 +125,7 @@ def main() -> None:
 
     (
         weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart,
-        sleeper_players, injuries, schedules, snap_share, contract_history,
+        sleeper_players, injuries, schedules, snap_share, contract_history, play_volume,
     ) = load_raw()
 
     print("Building season-level stats...")
@@ -150,9 +161,11 @@ def main() -> None:
 
     print(f"Projecting {args.draft_season} rookie class from draft capital...")
     rookie_table = build_rookie_training_table(season_stats, draft_picks[draft_picks["season"] < args.draft_season])
-    rookie_averages = fit_rookie_averages(rookie_table)
+    rookie_curve = fit_rookie_curve(rookie_table)
+    outcome_range = compute_rookie_outcome_range(rookie_table)
     current_picks = draft_picks[draft_picks["season"] == args.draft_season]
-    rookie_board = project_rookies(current_picks, rookie_averages)
+    rookie_board = project_rookies(current_picks, rookie_curve)
+    rookie_board = add_rookie_outcome_range(rookie_board, outcome_range)
     rookie_board["total_points_pred"] = rookie_board["ppg_pred"] * rookie_board["games_est"]
     rookie_board = rookie_board.rename(columns={"pfr_player_name": "player_display_name"})
     rookie_board["age"] = pd.NA
@@ -177,7 +190,8 @@ def main() -> None:
     rookie_board = rookie_board[
         ["player_id", "player_display_name", "position", "team", "age", "team_changed",
          "new_head_coach", "new_hc_prior_team_ppg", "prev_snap_share_trend", "prev_snap_share_level",
-         "cap_percent", "sos_pts_allowed_pg", "ppg_pred", "games_est", "total_points_pred", "is_rookie"]
+         "cap_percent", "sos_pts_allowed_pg", "ppg_pred", "games_est", "total_points_pred", "is_rookie",
+         "ppg_outcome_low", "ppg_outcome_high"]
     ]
     print(f"  {len(rookie_board):,} rookies projected")
 
@@ -231,6 +245,14 @@ def main() -> None:
     else:
         print(f"  no coaching dataset found at {oc_path}, skipping OC context")
 
+    print("Projecting team pace/pass-rate and computing team-specific opportunity ceilings...")
+    coach_history = build_head_coach_history(schedules)
+    season_pace = compute_team_season_pace(play_volume)
+    pace_pred = project_team_pace(season_pace, args.draft_season, coach_history)
+    efficiency_ceiling = compute_efficiency_ceiling(season_stats, rosters, play_volume)
+    team_ceiling = compute_team_position_ceiling(pace_pred, efficiency_ceiling)
+    board = apply_team_opportunity_cap(board, team_ceiling)
+
     print("Computing value-based rankings...")
     board = compute_vbd(
         board,
@@ -254,6 +276,19 @@ def main() -> None:
     team_out_path = OUTPUT_DIR / f"team_offense_projection_{args.draft_season}_{args.scoring}.csv"
     team_offense.to_csv(team_out_path, index=False)
     print(f"Wrote {len(team_offense):,} team offense projections -> {team_out_path}")
+
+    print("Projecting weekly, opponent-adjusted points...")
+    weekly_matchups = build_weekly_matchups(schedules, args.draft_season)
+    weekly_board = project_weekly_points(board, weekly_matchups, defense_strength, args.draft_season)
+    weekly_board = weekly_board.merge(
+        board.dropna(subset=["player_id"])[["player_id", "player_display_name", "position", "team", "vbd"]],
+        on="player_id", how="left",
+    )
+    weekly_board = weekly_board.sort_values(["vbd", "week"], ascending=[False, True]).drop(columns="vbd")
+    weekly_board = weekly_board.round(2)
+    weekly_out_path = OUTPUT_DIR / f"weekly_projections_{args.draft_season}_{args.scoring}.csv"
+    weekly_board.to_csv(weekly_out_path, index=False)
+    print(f"Wrote {len(weekly_board):,} player-week projections -> {weekly_out_path}")
 
 
 if __name__ == "__main__":

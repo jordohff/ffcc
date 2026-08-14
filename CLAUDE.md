@@ -892,3 +892,408 @@ its actual mechanical source (`estimate_games_played`), not bolted on as a VBD-l
 narrower, more defensible, better-tested change than what was originally proposed. Next: #2 (man-games
 replacement depth) and #1 (empirical flex-slot allocation), per the user's stated priority order.
 
+
+
+### 2026-08-13 â€” VBD refinement (man-games depth, empirical flex split), injury-ding investigation (null result), rookie curve fix
+
+User's stated priority order from the prior session's VBD research ("#3 then #2 then #1") continued: #3 (risk weighting)
+was already shipped previously; this session did #2 (man-games replacement depth) and #1 (empirical flex-slot
+allocation), plus two new asks: stop over-penalizing previously-injured players, and fix rookie touch projections
+(specifically flagged: Jeremiyah Love and Jadarian Price "should not be going next to each other").
+
+**#2 - man-games replacement depth.** The static `teams*slots` replacement rank assumed exactly that many players
+are needed all season. Measured directly from `season_stats` (2010-2025): for each season, took the top
+`teams*slots` players at each position by realized total points and averaged what fraction of a 17-game season
+they actually played. Even "good enough to matter" players miss real time - RB availability ~90% (2016+: 89.9%),
+WR ~92%, TE ~91%, QB ~95%. `MAN_GAMES_DEPTH_MULTIPLIER` in `compute_vbd` (season.py) is `1/availability` per
+position: QB 1.06, RB 1.11, TE 1.10, WR 1.08 - RB deepens the most, matching its well-known injury volatility.
+Deliberately NOT the much larger (3-5x) ratio you'd get by counting every player who ever had one boom week in
+the starter tier across a season (tested and rejected first - that conflates real rostered depth with one-off
+waiver flukes and would blow the replacement bar out to an implausible depth).
+
+**#1 - empirical flex-slot allocation.** Previously a flat 45/45/10 RB/WR/TE rule of thumb. Measured empirically
+instead: for every REG-season week 2010-2025, locked in the top `teams*slots` players at each of RB/WR/TE by that
+week's realized points as dedicated starters, then tallied the position of the next `teams*flex_slots` best
+remaining players (who'd actually fill the flex spot that week). Real result diverges sharply from the old
+assumption: WR takes ~79% of flex value (2016+), RB ~16%, TE ~4-5% - WR stays productive much deeper into the
+player pool (a WR40 can still post a real week) while usable RB/TE production falls off a cliff right after the
+dedicated starter slots. `FLEX_ALLOCATION` in season.py now uses `{"RB": 0.16, "WR": 0.79, "TE": 0.05}`. Net
+effect: this SHRINKS RB's flex credit (fewer effective bodies count toward RB's replacement rank, which lowers
+the rank and evenly raises every RB's VBD) rather than granting it a near-equal share - consistent with RB being
+the scarcer, more front-loaded redraft position, and with why RBs go early in real drafts (so few remain useful
+past the position's top).
+
+**Injury-ding investigation: honest null result, no new correction shipped.** User's concern: "the model is
+slightly hallucinating and really dinging guys too much that have been hurt." Tested this properly rather than
+assuming either direction, extending the walk-forward methodology from the prior session's durability work:
+- Re-tested the ALREADY-SHIPPED bounce-back correction (from last session) for a "durable-before" subgroup
+  (healthy >=14 games in BOTH of the two seasons before a recent injury - i.e. a clean one-off injury, not a
+  chronic pattern): n=85, mean games_resid = -1.035 (p=0.059) - if anything the CURRENT correction trends
+  slightly GENEROUS for this subgroup already, not stingy. Not significant enough to adjust either direction.
+- New test: walk-forward re-trained the actual Ridge PPG models for every test season 2018-2025 and checked
+  whether the RATE prediction itself (not just durability) is biased for players coming off a short season
+  (`games_t1 < 10`). Aggregate recent-injury cohort (n=1,271): mean ppg_resid = **-0.303** (p=0.0015) - the
+  model actually OVER-predicts this cohort's scoring rate on average, the opposite of "dinging too much."
+- Specifically isolated whether ESTABLISHED/elite talent (best healthy-season ppg in the 3 seasons before the
+  injury, among seasons with >=10 games played) shows the pattern the user suspected: with n=79 in the elite
+  (14+ ppg) tier, mean ppg_resid = +0.091 (p=0.880) - statistically indistinguishable from zero. An earlier,
+  smaller cut (n=36) had hinted at a positive bias here, but washed out to noise with a properly-powered sample.
+- **Conclusion: walk-forward testing does not support a broad "recently-injured players get under-projected"
+  bias, for durability OR for scoring rate, at any talent tier tested.** No correction shipped - matches this
+  project's established discipline (see the reverted age x elite interaction, and the McCaffrey-old-injury test
+  from last session) of not shipping a fix the data doesn't support, even when the underlying concern is
+  reasonable. The one real, previously-documented gap that remains (and IS a plausible source of the user's
+  impression) is unchanged from before: `flag_injury_affected_weeks` only catches OFFICIALLY-reported
+  Questionable/Doubtful stretches, and will still miss a player who's visibly playing hurt without being
+  re-tagged on the injury report (the CeeDee Lamb 2024 case documented previously) - no viable bulk-structured
+  data source for that was found then or now.
+
+**Rookie projection fix: pick-based curve replaces round-bucket average, applies to the full class (and future
+classes) automatically.** Root cause of the flagged bug: `project_rookies` grouped by `(position, round_bucket)`
+and gave every rookie in the same bucket an IDENTICAL `ppg_pred`/`games_est`. Jeremiyah Love (RB, pick 3 overall)
+and Jadarian Price (RB, pick 32 - the last pick of the SAME round-1 bucket) were getting literally the same
+projection despite an enormous real gap in draft capital. Per the user's explicit ask, fixed generally rather
+than patched for these two names: `fit_rookie_curve` (season.py, replaces `fit_rookie_averages`) fits
+`ppg ~ a + b*log(pick)` and the same shape for `games_played`, per position, via simple linear regression
+(`np.polyfit` on log(pick) - not a black-box model, log-linear because draft capital value is well-documented to
+decay roughly log-linearly, not straight-linearly, across a draft). `project_rookies` now applies this curve to
+each rookie's own overall pick number. This is a function of pick number, not a lookup table, so it generalizes
+to every future draft class without any additional work.
+
+Fit quality (2010-2025 classes, RÂ² of ppg ~ log(pick)): QB 0.45, RB 0.35, TE 0.32, WR 0.30 - real signal (a flat
+bucket mean has an effective within-bucket RÂ² of 0). Removed the now-dead `_round_bucket` helper and
+`round_bucket` column entirely (nothing consumed them anymore) rather than leaving unused code around.
+
+Verified against real historical comps before trusting the extrapolation at the very top of the draft (where
+training examples are sparse - very few RBs are ever drafted picks 1-5): the closest historical picks-2-4 RB
+comps are Saquon Barkley (pick 2: 21.27 ppg, 16 games as a rookie), Ezekiel Elliott (pick 4: 20.63 ppg, 15
+games), Leonard Fournette (pick 4: 16.32 ppg, 13 games), Trent Richardson (pick 3: 15.28 ppg, 15 games) - their
+average total production (~273 pts) brackets the model's prediction for Love (pick 3: 18.02 ppg x 17 games =
+306 pts) rather than the fit being an ungrounded extrapolation artifact. Confirmed Love/Price are now clearly
+differentiated: Love projects RB1 overall on the 2026 board (VBD 173.74, ahead of every returning veteran
+including Gibbs), Price projects RB35 (VBD -14.32, below replacement) - matching the real gap between a top-3
+overall selection and the last pick of the round. Known soft spot, noted rather than hidden: the `games_played`
+half of the curve has no ceiling built into the regression itself (only the final `clip(upper=17)` catches it),
+so at the very top of the draft the raw fitted value exceeds 17 and gets silently capped rather than curving
+smoothly toward it - fine in practice (games_est correctly reads 17.0 for Love) but worth knowing if a future
+session revisits the curve shape.
+
+Regenerated `output/draft_rankings/draft_rankings_2026_half_ppr.csv` (685 rows) and
+`output/draft_rankings/team_offense_projection_2026_half_ppr.csv` with all four changes. 2025 holdout backtest
+after the injury-cohort/VBD work (VBD changes don't affect the ppg/games backtest, which is unaffected by
+replacement-level math): QB 0.722, RB 0.779, TE 0.806, WR 0.803 - consistent with the prior session's numbers
+(VBD-only and rookie-curve-only changes don't touch the vet model's own accuracy).
+
+
+
+### 2026-08-13 â€” Jeremiyah Love overrate diagnosis, team opportunity cap, and the start of a plays-per-game architecture
+
+User flagged Jeremiyah Love (RB, ARI) ranking #1 overall on the 2026 board despite going round 3 in real
+fantasy drafts, citing Arizona's crowded backfield (Tyler Allgeier signed in FA, James Conner still on roster)
+and the team's overall quality. Asked to diagnose, then look for similar scenarios league-wide.
+
+**Real bug found and fixed first: every 2026 rookie's `gsis_id` in `load_draft_picks()` is a placeholder, not
+a real gsis_id** (confirmed 257/257 2026 picks fail to match the standard "00-XXXXXXX" format) - nflreadpy
+hasn't back-filled the league's official ID system for a draft class this recent. This silently broke EVERY
+merge keyed on player_id for a true rookie (depth chart, Sleeper, SOS) - `depth_chart_rank` was NaN for every
+2026 rookie, hiding exactly the situational context needed to diagnose this. Fixed in
+`load_draft_pick_capital` (data.py): crosswalks through `pfr_player_id` (a real, correct PFR ID even for
+brand-new rookies) against `load_players()`'s own pfr_id<->gsis_id mapping - same crosswalk pattern already
+used in `load_snap_share`. Recovers a real gsis_id for 231/257 (90%) of the 2026 class; the rest are almost
+entirely non-fantasy positions (OL/DL/LB/DB).
+
+**Tested three statistical hypotheses for a "crowded landing spot" correction on the rookie curve - all came
+back null.** Using the same walk-forward-style rigor as the durability work: (1) binary "was there an
+established veteran teammate" flag, (2) continuous "returning teammate carries_pg", (3) team offensive quality
+(prior-season team PPG). None reached significance (p=0.18-0.88) against 15 years of rookie RB residuals, even
+restricted to early (top-100) picks. Conclusion: not a fittable statistical correction with the data available
+- this is a small-n power problem (very few early-round RBs land in truly crowded situations historically), not
+proof no effect exists. No numeric correction shipped on this basis, consistent with the project's standing
+discipline against unjustified fixes.
+
+**The real, provable root cause: no shared "team opportunity" constraint across teammates.** Every player -
+veteran or rookie - is fit completely independently, so nothing stops two players on the same roster from each
+getting a plausible-looking standalone projection that together sum to something no real team has ever
+produced. Systematically scanned all 128 team/position units on the 2026 board against 15 years of historical
+team-position-season totals: only 2 exceeded the historical range meaningfully, but one of them was
+**Arizona's projected RB corps at 617 combined points - more than any team's RB group has EVER scored** (prior
+record: 570, 2024 Lions) - a literal statistical impossibility, not just an aggressive number. Same root cause,
+second case: Las Vegas's Fernando Mendoza (QB) projected for 277 points despite sitting BEHIND Kirk Cousins on
+the actual depth chart, pushing LV's total QB output to 442.9 - effectively tied for the all-time record
+(444.6, 2024 MIN). Every other team/position unit was within its historical range (a handful of legitimately
+deep units - TEN/NYG/DEN WR rooms - flagged above the 95th percentile but nowhere near the all-time max, i.e.
+plausible, not broken).
+
+**Shipped an interim fix: `apply_team_opportunity_cap`** (season.py) - `TEAM_POSITION_CEILING` holds the
+empirical all-time-max total for each position (QB 444.6, RB 570.3, WR 782.2, TE 460.9, all 2010-2025). If a
+team's summed `total_points_pred` at a position exceeds the ceiling, every player in that group is scaled down
+proportionally (via `ppg_pred`, `games_est` left untouched) until the group fits. Wired into
+`build_draft_rankings.py` right before `compute_vbd`. Verified: Arizona's RB total now caps exactly at 570.3
+(was 617.4), Love's own total drops 306 -> 283. **Important, honestly-reported limitation: Love still ranks #1
+overall afterward** - the cap is a seatbelt, not a real fix. Proportional scaling doesn't know Conner/Allgeier
+should eat MORE of the correction than Love; it just trims the whole group evenly. Real resolution needs to
+actually model how touches get allocated within a crowded backfield, not just cap the sum after the fact.
+
+**User's response: this should go further than a cap - compute projected plays per game by offense and weight
+player shares from that, and this should extend to weekly, opponent-matchup-aware projections summing to a
+season total** (a standing want since project start - see the 2026-08-09 initial-build entry's "Forward-looking
+weekly projections... is a natural next step" note, now being acted on). Explained the architecture: team plays
+per game (pace) x pass/rush split x player's share of that volume x per-play efficiency, built so shares sum to
+~1 by construction - this makes an Arizona-RB-style impossibility structurally unreachable rather than
+something to catch after the fact, and the SAME infrastructure (plus opponent-adjusted efficiency per week,
+reusing the existing SOS/defense-strength work) extends naturally into the forward-looking weekly model this
+project has wanted since day one. User confirmed sequencing: (1) team plays-per-game model, (2) player
+share-of-volume model, (3) weekly/matchup-aware projections summing to a season total.
+
+**Step 1 (team plays-per-game model): built and validated, not yet wired into any prediction.**
+`load_team_play_volume` (data.py) pulls full nflreadpy play-by-play (not the existing `pbp_dropbacks.parquet`,
+which only has pass plays), filters to REG season offensive snaps (`rush_attempt==1 or pass_attempt==1`),
+aggregates immediately to team/game play counts rather than caching full play-level detail. Cached to
+`data/raw/team_play_volume.parquet` (8,350 rows, 2010-2025), added to `pull_data.py`.
+`compute_team_season_pace` (season.py) rolls this to team/season plays-per-game and pass-rate.
+`project_team_pace` forecasts a target season via the same 50/30/20 HISTORY_WEIGHTS recency-weighting used
+throughout this pipeline (renormalized for teams with less history, e.g. relocated franchises). **Validated
+against real, checkable football knowledge before trusting it**: Baltimore projects as the league's most
+run-heavy team for 2026 (48% pass rate) - matches the Ravens' real, well-known Lamar-Jackson-era identity;
+Cincinnati/Arizona most pass-heavy (64%/61%); Dallas fastest pace (65.8 plays/game). League averages (62.1
+plays/game, 56.6% pass rate) land right in the normal real-NFL range. This is pure infrastructure so far - it
+doesn't change any board output yet; step 2 (player share-of-volume) is what will actually consume it.
+
+**Next**: step 2 (player share-of-volume model - the harder piece, especially for rookies with no usage
+history of their own), then step 3 (extend to weekly, schedule/opponent-aware projections summing to a season
+total, reusing steps 1+2 plus the existing SOS/defense-strength infrastructure).
+
+
+
+### 2026-08-13 â€” plays-per-game model refined: coaching-scheme transfer (real signal), offensive quality (tested, rejected)
+
+User asked to enrich the new team plays-per-game model (step 1 of the opportunity-share architecture) with two
+considerations before moving to step 2: head coaching changes affecting run/pass splits, and whether better
+offenses run more plays.
+
+**Head coach scheme transfer: real, tested, shipped.** Hypothesis: a team's OWN trailing pass_rate reflects the
+OLD coach's scheme in the season a new HC arrives, so continuity alone is the wrong anchor for a real coaching
+change. Tested against every real HC change 2011-2025 (n=8 - genuinely rare events) where the incoming coach
+was already a head coach elsewhere the prior season: guessing that coach's own PRIOR team's pass_rate cut mean
+absolute error nearly in half vs. team continuity (0.040 vs 0.077, paired t-test p=0.029), and error dropped
+monotonically as more weight shifted toward the "import" guess, all the way to 100%. Shipped as
+`HC_SCHEME_IMPORT_WEIGHT = 0.7` in `project_team_pace` (season.py) - chose 70%, not the in-sample-best 100%,
+since n=8 is too small to trust the exact optimum (hedges against personnel constraints capping how much of an
+old scheme actually transfers). New helper `_incoming_coach_pass_rate` finds, for each team with a real
+back-to-back-HC change, that coach's own prior team's pass_rate to blend in. Deliberately does NOT extend to
+plays_per_game (raw tempo) - the same test showed the import guess was WORSE than continuity there and not
+significant (p=0.83) - tempo is much less cleanly a "coach's scheme" trait than pass/run identity is.
+
+Validated against the real, confirmed 2026 coaching class (7 new HCs: BAL/Minter, CLE/Monken, LV/Kubliak,
+MIA/Hafley, NYG/Harbaugh, PIT/McCarthy, TEN/Saleh): only ONE actually triggers the blend - John Harbaugh,
+Baltimore's HC through 2025 now at NYG - since it requires the incoming coach to have been a real HC elsewhere
+the immediately prior season (same documented limitation as `new_hc_prior_team_ppg` - McCarthy/Saleh both had a
+year out of a HC chair before their new job, so there's no "elsewhere last season" to import from). Correctly
+pulls NYG's projected pass_rate DOWN from continuity's 0.56 to 0.504 - matches Harbaugh's well-known, real
+run-heavy Baltimore/Lamar-Jackson-era offensive identity, a real, checkable, well-documented storyline (Harbaugh
+bringing his run-committed philosophy to a new team), not a coincidence.
+
+**Offensive quality -> plays per game: tested directly, genuinely rejected, nothing shipped.** User's intuition
+("better offenses likely on the field more") IS true in a raw sense - same-season team_offensive_ppg correlates
+with plays_per_game at r=0.40 (p<0.0001, n=482), and even holds lagged a season (r=0.22, p<0.0001) which is the
+form usable for projection (knowable in advance, not circular). But testing whether this adds anything BEYOND
+what a team's own pace continuity already captures showed it doesn't: the residual correlation (offensive
+quality vs. plays_per_game after removing what continuity alone predicts) is small, significant, and actually
+NEGATIVE (r=-0.135, p=0.004) - once you already know a team's own recent pace, being a good offense doesn't
+predict MORE plays on top of that, if anything trends slightly the other way (plausibly because efficient
+offenses can also score quickly and end drives early, offsetting the "more first downs" effect). Adding a
+positive offensive-quality scaling factor on top of continuity, as originally proposed, would have been both
+redundant and directionally wrong. No feature shipped for this - reported as a genuine, tested null result
+rather than forced in because the initial intuition sounded reasonable, matching this project's standing
+discipline (see the earlier VBD risk-adjustment and rookie-crowding null results this same day).
+
+Next: step 2, the player share-of-volume model (how a team's projected plays/pass-rate get allocated across
+individual players - the harder, more novel piece of this architecture, especially for rookies with no usage
+history of their own).
+
+
+
+### 2026-08-13 â€” rookie share-of-volume model: real signal found, but too small to close the market-ADP gap alone
+
+Continuation of the plays-per-game architecture (step 2: player share-of-volume). Computed real historical
+`carry_share` (player carries_pg / team rush_plays_pg, using the new team_play_volume data) and re-tested the
+"crowded landing" hypothesis directly on SHARE (opportunity) instead of ppg (points, which mixes in touch
+efficiency noise and had washed the signal out in the earlier ppg-based test).
+
+**Iteration 1 (single prior season "established" definition)**: real, significant effect (r=-0.179, p=0.003,
+n=270) - more established competition predicts a smaller rookie carry_share. But measurement-limited: excluded
+James Conner from Arizona's 2026 competition count entirely, because his 2025 was injury-shortened (3 games,
+fails a games>=8 filter) even though he's clearly a real, established veteran.
+
+**Iteration 2 (naive multi-year fix, summed)**: attempted to fix the Conner exclusion by looking back 3 seasons
+per teammate for their most recent qualifying (games>=8) season, regardless of team, and SUMMING across all
+roster teammates. This backfired badly: signal vanished entirely (r=0.006, p=0.92), and produced an implausible
+37.6 combined-carries-per-game figure for Arizona - caused by counting EVERY marginal depth player's stale,
+sometimes years-old, sometimes different-team qualifying season and piling them all up. Real lesson: a real
+backfield only has 1-2 genuine threats to a rookie's role; summing across an entire 7-deep roster snapshot
+(including practice-squad-tier players) drowns the real signal in noise from players who don't actually matter.
+
+**Iteration 3 (recency-weighted MAX instead of sum)**: fixed by using only the SINGLE strongest teammate's
+value (not a sum), decayed by recency (weights 1.0/0.6/0.3 for 1/2/3 seasons back, matching the spirit of
+HISTORY_WEIGHTS elsewhere). This restored a real, significant signal: r=-0.155, p=0.011, and a two-variable
+model (`carry_share ~ log(pick) + comp_max`) improves RÂ² from 0.318 (pick-only) to 0.325 - modest but genuine.
+
+**Honest bottom line, not yet shipped**: even this correctly-measured, statistically real signal barely moves
+Jeremiyah Love's actual predicted carry_share (0.726 vs. 0.716 pick-only) - the coefficient is real but small.
+This means the ~2-round gap between our model (currently RB1 overall) and real fantasy-market ADP (round 3) is
+NOT primarily explained by roster-competition crowding, even measured correctly. The remaining gap more likely
+reflects something this kind of average-historical-outcome model structurally can't capture: real fantasy
+markets apply a general uncertainty/risk discount to ALL unproven rookies (our model gives a point estimate -
+the historical AVERAGE outcome for that draft slot - not a risk-adjusted one), and/or qualitative situational
+read (offensive line quality, expected game script, beat-reporter camp-battle intel) that isn't in any of this
+project's data sources. Not yet decided whether/how to pursue a rookie-specific uncertainty discount (distinct
+from the veteran boom/bust volatility discount already tested and REJECTED earlier this project - unproven
+rookies are a different population with a much more defensible case for it, but this hasn't been tested yet).
+
+Next: user checkpoint on how to proceed - ship the modest, validated comp_max signal as a real (if incomplete)
+improvement, dig into a rookie uncertainty discount specifically, or move on to veteran share-of-volume /
+team-level normalization (the other pending pieces of step 2) and revisit rookies later.
+
+
+
+### 2026-08-13 â€” rookie uncertainty discount: tested and rejected (twice more), outcome-range shipped instead
+
+Continuation of the Love diagnosis. User asked to investigate whether unproven rookies specifically (distinct
+from the veteran boom/bust volatility question already tested and rejected earlier this project) warrant an
+uncertainty discount on the point estimate.
+
+**Test 1: is the point estimate inflated by a skewed distribution (a few boom seasons dragging up the mean)?**
+Checked the real shape of the outcome distribution for RB picks 1-15 (2010-2025, n=12): mean 13.54 ppg, median
+13.60 ppg - essentially identical, skew -0.20 (slightly LEFT-skewed, not right). The premise behind "the average
+is misleading" doesn't hold - the point estimate is already a fair summary of the typical outcome, not one a
+couple of stars (Barkley, Elliott) are inflating.
+
+**Test 2: does comp_max (the validated established-competition signal from the share-of-volume work) matter
+enough to discount ppg specifically?** Real on pure opportunity/carry_share (r=-0.155, p=0.011, RÂ² 0.318->0.325)
+but tested directly on ppg (the actual predicted quantity, which mixes share with touch efficiency) it adds
+essentially nothing once draft pick is already known: two-var RÂ² 0.392 vs pick-only 0.392-0.393, noise-level.
+Pick number already implicitly captures most of what roster crowding would tell you (teams don't usually spend
+premium capital at RB into an already-blocked backfield in the first place). **Not shipped as a ppg_pred
+adjustment** - real on one metric, doesn't clear the bar on the one that matters.
+
+This is the third and fourth time this project has gone looking for a reason to discount a projection below its
+point estimate (veteran boom/bust volatility, McCaffrey's old-injury pattern, rookie distribution skew, rookie
+competition-on-ppg) and found the data doesn't support it. Consistent with the user's stated "draft for upside,
+not scared" philosophy, now validated on four separate fronts rather than just asserted.
+
+**Shipped instead: `compute_rookie_outcome_range`/`add_rookie_outcome_range` (season.py)** - real historical
+10th/90th percentile rookie-season ppg by position and draft round (round bucketed 1/2/3/4/5-7, reviving a
+narrower version of the old `_round_bucket` helper - needed here because a PERCENTILE wants a real grouped
+sample, unlike the point-estimate curve which benefits from smooth log(pick) fitting). Added `ppg_outcome_low`/
+`ppg_outcome_high` columns to the rookie board. This doesn't touch VBD/rankings at all - it's pure display
+context, letting a human weigh real spread/risk against their own tolerance rather than the model silently
+shrinking (or not shrinking) the number for everyone.
+
+**User's important framing, worth remembering going forward**: the real, still-open gap between this model's
+rookie projections and true market ADP most likely comes from genuinely real signal this project's data sources
+simply don't cover - offensive line quality, expected game script, and (a new one) beat-reporter camp/practice
+intel. User has this last one already, informally, spread across 32 team-specific Discord channels, and plans
+to compile it into a single txt file for a future session to pull from as a real, situational, per-player
+override/context source - not built yet, no file exists yet, flagged here so a future session knows this is
+coming rather than needing to be asked again. Offensive line quality and game-script projections remain
+genuinely unscoped - no identified nflreadpy source yet, would need real investigation before committing to
+either (matching this project's established practice of checking data availability before promising a feature).
+
+Next: continue step 2 (veteran share-of-volume + team-level normalization) or move to step 3 (weekly
+matchup-aware projections), per the user's next call.
+
+
+
+### 2026-08-13 â€” step 1 wired into predictions: team-specific, pace-aware opportunity ceiling replaces the flat cap
+
+User asked to actually wire the (previously built but unused) plays-per-game infrastructure into predictions,
+and keep pushing on the recommended path. Replaced the flat `TEAM_POSITION_CEILING` (same historical all-time
+max applied to every team regardless of their own tendencies) with a team-specific ceiling built from step 1's
+own pace/pass-rate projections.
+
+**`compute_efficiency_ceiling`** (season.py): 95th-percentile historical points-per-team-attempt at each
+position (2010-2025) - QB 0.64, RB 1.00, WR 1.00, TE 0.45 points per attempt - a generous but real, bounded
+efficiency rate (not an unbounded best-case).
+
+**`compute_team_position_ceiling`**: multiplies a team's own PROJECTED 2026 attempt volume (from
+`project_team_pace` - plays_per_game_pred x pass_rate_pred x 17, split into rush/pass attempts) by the
+efficiency ceiling, giving each team/position its own ceiling instead of one global number. This is the actual
+"wiring in" of step 1 - it was validated infrastructure sitting unused until now.
+
+**Concretely fixes the flat cap's blind spot**: Arizona is a pass-heavy team (~65% pass rate, established in the
+earlier pace validation) with comparatively little rushing volume, so its real RB ceiling comes out to ~420
+points - well BELOW the flat all-time-max of 570 that applied equally to every team regardless of tendency.
+Run-heavy teams (Baltimore, and the Giants under incoming run-heavy-scheme coach John Harbaugh) correctly get a
+HIGHER ceiling than the flat constant, since they have the actual volume to support it. Sorted by 2026 team-RB
+ceiling: NYG/BAL/PHI/BUF lead (528-534), LV/CIN trail (382-383) - directly consistent with the pace/pass-rate
+findings from earlier this session, not a new, disconnected number.
+
+**Real effect on the board**: Arizona's RB corps total correctly caps at 419.8 now (was 570.3 under the flat
+cap, 617.4 uncapped). Jeremiyah Love drops from #1 overall to **#15 overall** (VBD 75.7, right around
+McCaffrey's range) - a legitimate, well-motivated outcome from real infrastructure (Arizona's own pass-heavy
+scheme genuinely limits their rushing pie), not an arbitrary discount. Systematic league-wide check: no
+team/position sum now exceeds the OLD flat historical-max reference at all (fully subsumed), and the league-wide
+distribution of team RB totals (mean 330.8) now closely matches the real historical league average (325.7,
+established earlier this session) - a strong, honest validation signal that the new mechanism produces
+realistic totals across the whole board, not just for the one case that prompted it.
+
+`TEAM_POSITION_CEILING` (the flat constant) is kept only as a fallback for a team/position with no pace
+projection available (e.g. a hypothetical relocated/expansion franchise with no play-volume history).
+
+This substantially completes the "team-level normalization" half of step 2's original scope (share-of-volume +
+normalization). Individual veteran share-of-volume modeling (replacing the trained Ridge model's implicit use of
+wavg_target_share/wavg_carries_pg with an explicit, separately-normalized share model) was considered but not
+pursued further given the rookie share testing this session found modest/inconsistent marginal value once
+draft-pick/history was already accounted for - the Ridge model already captures a meaningful amount of this
+implicitly through its existing usage features, unlike rookies who started with zero opportunity-awareness at
+all. Next: step 3, forward-looking weekly/opponent-matchup-aware projections summing to a season total - the
+standing ask from this project's very first session, and the natural extension of steps 1+2.
+
+
+
+### 2026-08-13 â€” step 3 shipped: weekly opponent-matchup projections, plus two real bugs caught before trusting it
+
+Built the forward-looking weekly projection this project has wanted since its very first session (see the
+2026-08-09 initial-build entry: "Forward-looking weekly projections... is a natural next step"). Deliberately
+does NOT re-predict each week from scratch - that would be a separate, separately-validated model. Instead it
+REDISTRIBUTES the already-validated season total across the real 2026 schedule:
+
+`build_weekly_matchups` (season.py): one row per team per REG-season week, their actual opponent, from
+`schedules`. `project_weekly_points`: for each player-week, `weekly_points = ppg_pred * matchup_factor *
+(games_est / 17)`, where `matchup_factor` is that week's specific opponent's points-allowed-per-game at the
+player's position (from the most recent completed season, same leak-safe convention as
+compute_strength_of_schedule) divided by the league average for that position/season - >1 means an
+easier-than-average matchup, <1 tougher. Bye weeks get an explicit 0.
+
+**Two real bugs caught in validation before shipping, not just an initial working version:**
+1. **NaN player_id fan-out** (the same class of bug already fixed once for the depth-chart merge earlier this
+   session): 7 rookies with no resolvable gsis_id share `player_id = NaN`, and a merge keyed on player_id
+   treats every null as matching every other null - inflated row counts up to 126 per player (7 x 18) and
+   scrambled weekly values across unrelated players before the fix. Fixed by dropping null-player_id rows
+   before any merge in `project_weekly_points`, plus the same fix in the display-name merge in
+   build_draft_rankings.py.
+2. **Missing games_est scaling** (more significant): the first working version applied a player's full
+   `ppg_pred` to EVERY non-bye week, silently assuming everyone plays all 17 games. Caught via systematic
+   reconciliation checking (weekly sum vs. the existing season total_points_pred) - a deep-bench rookie QB's
+   weekly sum came out 10x his real season total (games_est ~2, but rate applied across all 17 weeks). Fixed by
+   scaling every week's projection by `games_est / 17` - there's no signal for WHICH specific weeks a player
+   sits, so the durability discount is spread evenly across the schedule instead of guessed at.
+
+**Validated end to end**: after both fixes, weekly-sum-vs-season-total drift across all 608 matched players is
+mean -5.4%, std 3.0%, range -13.5% to +2.7% - small, non-systematic, and consistent with what's expected from a
+real, unbalanced schedule (deliberately NOT renormalized to force an exact match - a team's specific bye and 17
+real opponents aren't perfectly average by construction, so residual drift is correct behavior, not a bug to
+paper over). Spot-checked Buffalo's Josh Allen and Detroit's Jahmyr Gibbs: correct bye weeks (0 points), matchup
+factors ranging sensibly (0.68-1.32 for Allen, tracking real opponent defensive strength), values that look like
+real weekly fantasy projections.
+
+Output: `output/draft_rankings/weekly_projections_{season}_{scoring}.csv` (one row per rostered player per week,
+~12,200 rows for 2026) - player_id, week, opponent, is_bye, matchup_factor, weekly_points_pred, plus
+display_name/position/team for readability, sorted by season VBD then week.
+
+This completes the three-step plays-per-game architecture from earlier this session: (1) team pace/pass-rate
+projection, (2) team-level opportunity normalization (the pace-aware ceiling that replaced the flat historical
+cap and fixed the Jeremiyah Love overrate), (3) weekly opponent-adjusted distribution of the season total. All
+three reuse the same underlying infrastructure (project_team_pace, defense_strength/SOS) rather than being three
+disconnected features.
+

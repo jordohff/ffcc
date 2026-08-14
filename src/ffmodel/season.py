@@ -526,6 +526,144 @@ def compute_team_offensive_output(season_stats: pd.DataFrame, rosters: pd.DataFr
     return with_team.groupby(["team", "season"])["ppg"].mean().reset_index(name="team_offensive_ppg")
 
 
+def compute_team_season_pace(play_volume: pd.DataFrame) -> pd.DataFrame:
+    """Roll load_team_play_volume's per-game rows up to one row per team per
+    season: offensive plays per game, and the pass/rush split.
+
+    First piece of the plays-per-game opportunity model (see
+    apply_team_opportunity_cap's docstring for the problem this is meant to
+    eventually replace - a proportional cap is a safety net, not a real fix,
+    since it can't tell a true bell-cow rookie apart from a genuine
+    committee back, it just trims a team's group evenly). This function
+    only computes the HISTORICAL side; see project_team_pace for turning it
+    into a forward-looking estimate for a season that hasn't happened yet.
+    """
+    season_totals = (
+        play_volume.groupby(["team", "season"])
+        .agg(games=("game_id", "nunique"), total_plays=("total_plays", "sum"), pass_plays=("pass_plays", "sum"))
+        .reset_index()
+    )
+    season_totals["plays_per_game"] = season_totals["total_plays"] / season_totals["games"]
+    season_totals["pass_rate"] = season_totals["pass_plays"] / season_totals["total_plays"]
+    return season_totals[["team", "season", "plays_per_game", "pass_rate"]]
+
+
+HC_SCHEME_IMPORT_WEIGHT = 0.7
+
+
+def _incoming_coach_pass_rate(
+    coach_history: pd.DataFrame, season_pace: pd.DataFrame, target_season: int
+) -> pd.DataFrame:
+    """For every team with a NEW head coach in `target_season` who was
+    already a head coach elsewhere in `target_season - 1`, look up that
+    coach's own team's pass_rate from that prior season - the scheme
+    they're bringing with them. One row per team with a real prior-HC
+    scheme to import; teams with no coaching change, a first-time HC, or an
+    internal promotion (no "elsewhere" team to look up) simply don't appear.
+    """
+    this_year = coach_history[coach_history["season"] == target_season]
+    last_year = coach_history[coach_history["season"] == target_season - 1].rename(
+        columns={"head_coach": "prev_head_coach"}
+    )
+    changes = this_year.merge(last_year[["team", "prev_head_coach"]], on="team", how="left")
+    changes = changes[changes["prev_head_coach"].notna() & (changes["head_coach"] != changes["prev_head_coach"])]
+
+    prior_team = last_year.rename(columns={"team": "prior_team", "prev_head_coach": "coach_lookup"})
+    changes = changes.merge(
+        prior_team, left_on="head_coach", right_on="coach_lookup", how="inner"
+    )
+    changes = changes[changes["prior_team"] != changes["team"]]
+
+    prior_pace = season_pace[season_pace["season"] == target_season - 1].rename(
+        columns={"team": "prior_team", "pass_rate": "import_pass_rate"}
+    )
+    result = changes.merge(prior_pace[["prior_team", "import_pass_rate"]], on="prior_team", how="inner")
+    return result[["team", "import_pass_rate"]]
+
+
+def project_team_pace(
+    season_pace: pd.DataFrame, target_season: int, coach_history: pd.DataFrame | None = None
+) -> pd.DataFrame:
+    """Project each team's plays-per-game and pass-rate for `target_season`
+    as a recency-weighted average of their last 3 seasons (same 50/30/20
+    HISTORY_WEIGHTS used throughout this pipeline, renormalized for teams
+    with less history - e.g. a franchise that relocated only 2 seasons ago).
+    Pace and scheme tendency are fairly sticky team/coaching-staff traits
+    year to year, but do shift (a new coordinator can speed up or slow down
+    an offense), so recent seasons count for more rather than an unweighted
+    average.
+
+    If `coach_history` is given, a team getting a NEW head coach who was
+    already a head coach somewhere else last season blends in that coach's
+    own prior team's pass_rate (their scheme identity) at
+    HC_SCHEME_IMPORT_WEIGHT, rather than relying solely on THIS team's own
+    trailing history (which reflects the OLD coach's scheme, not the
+    incoming one). Tested against every real coaching change 2011-2025
+    (n=8 - genuinely rare events, so treat the exact weight as directional
+    rather than finely tuned): guessing the incoming coach's own prior-team
+    pass_rate cut error nearly in half vs. pure team continuity (mean abs
+    error 0.040 vs 0.077), and error dropped monotonically as more weight
+    shifted toward the import guess, all the way to 100%. Deliberately
+    chose 70%, not the in-sample-best 100% - hedges against personnel
+    constraints capping how much of an old scheme a new coach can truly
+    import, given how small and noisy this sample necessarily is (real HC
+    changes are infrequent). This does NOT extend to plays_per_game (raw
+    tempo): the same test showed the import guess was WORSE than
+    continuity there (not significant, p=0.83) - tempo is much less
+    cleanly a "scheme the coach brings with them" trait than pass/run
+    identity is, so plays_per_game is left as pure continuity regardless of
+    coaching changes.
+
+    Deliberately does NOT scale plays_per_game by team offensive quality,
+    despite the intuitive "better offenses stay on the field more" case for
+    it: tested directly (2010-2025) and while offensive quality DOES
+    correlate with plays_per_game in the same season (r=0.40) and even
+    lagged a season for projection use (r=0.22), that entire relationship
+    turned out to already be captured by a team's own pace continuity -
+    once continuity is already known, the ADDITIONAL signal from offensive
+    quality on top of it is small, statistically significant, and actually
+    slightly NEGATIVE (r=-0.135, p=0.004). Adding it as an extra positive
+    scaling factor would have been redundant with what continuity already
+    captures, and directionally wrong on top of that.
+    """
+    import_rates = (
+        _incoming_coach_pass_rate(coach_history, season_pace, target_season).set_index("team")["import_pass_rate"]
+        if coach_history is not None
+        else pd.Series(dtype=float)
+    )
+
+    rows = []
+    for team, team_history in season_pace.groupby("team"):
+        by_season = team_history.set_index("season")
+        weighted_plays = weighted_pass_rate = weight_total = 0.0
+        for lag, weight in enumerate(HISTORY_WEIGHTS, start=1):
+            season = target_season - lag
+            if season not in by_season.index:
+                continue
+            weighted_plays += by_season.loc[season, "plays_per_game"] * weight
+            weighted_pass_rate += by_season.loc[season, "pass_rate"] * weight
+            weight_total += weight
+        if weight_total == 0:
+            continue
+
+        continuity_pass_rate = weighted_pass_rate / weight_total
+        pass_rate_pred = continuity_pass_rate
+        if team in import_rates.index:
+            pass_rate_pred = (
+                HC_SCHEME_IMPORT_WEIGHT * import_rates[team] + (1 - HC_SCHEME_IMPORT_WEIGHT) * continuity_pass_rate
+            )
+
+        rows.append(
+            {
+                "team": team,
+                "season": target_season,
+                "plays_per_game_pred": weighted_plays / weight_total,
+                "pass_rate_pred": pass_rate_pred,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def compute_defense_strength(enriched_weekly: pd.DataFrame) -> pd.DataFrame:
     """For every (team, season, position), the average fantasy points that
     team's DEFENSE allowed per game to that position across the whole
@@ -600,6 +738,94 @@ def add_strength_of_schedule_features(table: pd.DataFrame, sos: pd.DataFrame) ->
     """
     table = table.merge(sos, on=["team", "season", "position"], how="left")
     return table
+
+
+def build_weekly_matchups(schedules: pd.DataFrame, season: int) -> pd.DataFrame:
+    """One row per team per REG-season week for `season`: who they play that
+    week. A team with a bye simply has no row for that week - callers that
+    need every week explicitly represented (e.g. a 0-point bye-week row)
+    should reindex against the full week range themselves.
+    """
+    reg = schedules[(schedules["season"] == season) & (schedules["game_type"] == "REG")]
+    home = reg[["week", "home_team", "away_team"]].rename(columns={"home_team": "team", "away_team": "opponent"})
+    away = reg[["week", "away_team", "home_team"]].rename(columns={"away_team": "team", "home_team": "opponent"})
+    return pd.concat([home, away], ignore_index=True)
+
+
+def project_weekly_points(
+    board: pd.DataFrame, weekly_matchups: pd.DataFrame, defense_strength: pd.DataFrame, target_season: int
+) -> pd.DataFrame:
+    """Distribute each player's season-level `ppg_pred` across the actual
+    2026 schedule, week by week, scaled up or down by how tough that
+    specific week's opponent is at the player's position - rather than
+    assuming a flat, identical points total every week.
+
+    Deliberately does NOT re-predict each week from scratch (that would be
+    a much bigger, separately-validated model). Instead it redistributes
+    the ALREADY-validated season total: `weekly_points = ppg_pred *
+    matchup_factor * (games_est / 17)`, where `matchup_factor` is that
+    week's opponent's points-allowed-per-game at the player's position
+    (from the most recent completed season - `target_season` itself hasn't
+    happened yet, same leak-safe convention as
+    compute_strength_of_schedule) divided by the LEAGUE-AVERAGE points
+    allowed to that position that same season. A factor of 1.0 means a
+    perfectly average matchup that week; >1 means an easier-than-average
+    matchup (weaker defense); <1 means tougher. Bye weeks get an explicit
+    0. The `games_est / 17` term is essential, not optional: `ppg_pred` is
+    a rate (points PER GAME PLAYED), and games_est already reflects that
+    plenty of players aren't expected to suit up every single week (bench
+    depth, injury-prone players, a rookie buried on a depth chart) -
+    applying the raw per-game rate to all 17 non-bye weeks silently assumed
+    every player plays every game, which is exactly wrong for anyone with
+    games_est well below 17 (caught this from a deep-bench rookie QB whose
+    weekly sum came out 10x his real season total before this fix - a
+    games_est of ~2 applied at full rate across 17 weeks). There's no
+    signal for WHICH specific weeks a player sits, so the discount is
+    spread evenly across the whole schedule rather than guessed at.
+    Matchup factors are NOT renormalized to force an exact reconciliation
+    with the season's total_points_pred - real schedules aren't perfectly
+    balanced (a team's bye and its specific 17 opponents are what they
+    are), so a small residual drift between the weekly sum and the season
+    total is expected and correct, not a bug to paper over.
+
+    Drops any board row with a null player_id before building the weekly
+    schedule - a handful of very-late-round/UDFA rookies have no resolvable
+    gsis_id (see load_draft_pick_capital's crosswalk docstring) and a
+    left-merge keyed on player_id treats every null as matching every other
+    null, which would silently scramble weekly rows across unrelated
+    players (the same class of bug already fixed once for the depth-chart
+    merge in build_draft_rankings.py).
+    """
+    board = board.dropna(subset=["player_id"])
+
+    league_avg = defense_strength.groupby(["season", "position"])["pts_allowed_pg"].mean().reset_index(
+        name="league_avg_pts_allowed_pg"
+    )
+    opponent_defense = defense_strength.rename(columns={"team": "opponent"})
+    opponent_defense = opponent_defense.assign(season=opponent_defense["season"] + 1)
+    opponent_defense = opponent_defense.merge(
+        league_avg.assign(season=league_avg["season"] + 1), on=["season", "position"], how="left"
+    )
+    opponent_defense = opponent_defense[opponent_defense["season"] == target_season]
+    opponent_defense["matchup_factor"] = (
+        opponent_defense["pts_allowed_pg"] / opponent_defense["league_avg_pts_allowed_pg"]
+    )
+
+    weeks = pd.DataFrame({"week": weekly_matchups["week"].unique()})
+    n_weeks = len(weeks)
+    schedule = board[["player_id", "team", "position", "ppg_pred", "games_est"]].merge(weeks, how="cross")
+    schedule = schedule.merge(weekly_matchups, on=["team", "week"], how="left")
+
+    schedule = schedule.merge(
+        opponent_defense[["opponent", "position", "matchup_factor"]], on=["opponent", "position"], how="left"
+    )
+    schedule["matchup_factor"] = schedule["matchup_factor"].fillna(1.0)
+    schedule["is_bye"] = schedule["opponent"].isna()
+    availability = schedule["games_est"] / n_weeks
+    schedule["weekly_points_pred"] = (schedule["ppg_pred"] * schedule["matchup_factor"] * availability).where(
+        ~schedule["is_bye"], 0.0
+    )
+    return schedule[["player_id", "week", "opponent", "is_bye", "matchup_factor", "weekly_points_pred"]]
 
 
 def add_head_coach_features(
@@ -910,14 +1136,6 @@ def predict_vet_ppg(models: dict[str, Pipeline], rows: pd.DataFrame) -> pd.Serie
     return preds
 
 
-def _round_bucket(round_num: pd.Series) -> pd.Series:
-    """Collapse draft round into 1/2/3/4/'5-7' buckets. Rounds 5-7 ("Day 3")
-    are grouped together since per-round rookie sample sizes get noisy fast
-    once you're only looking at, say, round-6 tight ends across 15 seasons.
-    """
-    return round_num.clip(upper=5).map({1: "1", 2: "2", 3: "3", 4: "4", 5: "5-7"})
-
-
 def build_rookie_training_table(season_stats: pd.DataFrame, draft_picks: pd.DataFrame) -> pd.DataFrame:
     """Find each drafted player's actual rookie season (their first season
     with a recorded stat line matching their draft class year) and attach
@@ -952,34 +1170,138 @@ def build_rookie_training_table(season_stats: pd.DataFrame, draft_picks: pd.Data
     )
 
     combined = pd.concat([rookie_stats.drop(columns="draft_position"), never_played], ignore_index=True)
-    combined = combined.assign(round_bucket=_round_bucket(combined["round"]))
     return combined
 
 
-def fit_rookie_averages(rookie_table: pd.DataFrame) -> pd.DataFrame:
-    """Historical average rookie-season PPG and games played, by position and
-    draft-round bucket - the whole "model" for projecting incoming rookies,
-    since there's no prior-season data to anchor a regression on.
+def fit_rookie_curve(rookie_table: pd.DataFrame) -> pd.DataFrame:
+    """Historical rookie-season PPG and games played as a smooth function of
+    OVERALL DRAFT PICK, fit per position - the whole "model" for projecting
+    incoming rookies, since there's no prior-NFL-season data to anchor a
+    regression on.
+
+    Replaces a coarser round-bucket average. That approach gave every rookie
+    in the same (position, round) bucket an IDENTICAL projection, which
+    broke down badly at the top of round 1: the 2026 class has Jeremiyah
+    Love (RB, pick 3 overall - a true top-3-overall selection, extraordinary
+    for a running back) and Jadarian Price (RB, pick 32 - the very last pick
+    of the same round) landing in the same bucket and getting the same
+    ppg_pred/games_est, which is obviously wrong given how differently those
+    two draft slots are actually valued.
+
+    Fit is a simple log-linear regression, `ppg ~ a + b*log(pick)` (and the
+    same shape for games_played), per position - not a black-box model,
+    matching this project's preference for something easily inspected and
+    second-guessed. log(pick) rather than raw pick because draft capital
+    value decays roughly log-linearly (well documented in draft-value chart
+    literature, e.g. the Jimmy Johnson/Rich Hill AV curves) - value drops
+    fast from pick 1 to pick 30, then flattens out through the late rounds,
+    which a straight linear fit in raw pick number would not capture.
+
+    Historical fit quality (2010-2025 draft classes, R² of ppg ~ log(pick)):
+    QB 0.45, RB 0.35, TE 0.32, WR 0.30 - real, usable signal (a flat
+    within-bucket average has an effective R² of 0), though naturally
+    noisier than the veteran models since a single college/combine profile
+    says much less than a played NFL season does. Verified against the 2026
+    class: Love (pick 3) now projects to ~16.8 ppg vs. Price (pick 32) at
+    ~8.8 ppg - the two picks that were previously identical are now clearly
+    differentiated, and this generalizes to every future draft class
+    automatically (it's a function of pick number, not a hardcoded lookup
+    for any specific player).
     """
-    return (
-        rookie_table.groupby(["position", "round_bucket"])
-        .agg(rookie_ppg=("ppg", "mean"), rookie_games=("games_played", "mean"), n=("ppg", "size"))
-        .reset_index()
-    )
+    rows = []
+    for position, pos_table in rookie_table.groupby("position"):
+        log_pick = np.log(pos_table["pick"].to_numpy(dtype=float))
+        ppg_slope, ppg_intercept = np.polyfit(log_pick, pos_table["ppg"].to_numpy(dtype=float), 1)
+        games_slope, games_intercept = np.polyfit(log_pick, pos_table["games_played"].to_numpy(dtype=float), 1)
+        rows.append(
+            {
+                "position": position,
+                "ppg_intercept": ppg_intercept,
+                "ppg_slope": ppg_slope,
+                "games_intercept": games_intercept,
+                "games_slope": games_slope,
+                "n": len(pos_table),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
-def project_rookies(current_draft_picks: pd.DataFrame, rookie_averages: pd.DataFrame) -> pd.DataFrame:
-    """Apply historical rookie-round averages to this year's actual draft
-    class, giving each rookie a `ppg_pred` and `games_est` the same way
-    veterans get one from the trained model.
+def project_rookies(current_draft_picks: pd.DataFrame, rookie_curve: pd.DataFrame) -> pd.DataFrame:
+    """Apply each position's historical pick -> production curve (see
+    fit_rookie_curve) to this year's actual draft class, giving each rookie
+    a `ppg_pred` and `games_est` the same way veterans get one from the
+    trained model - varying smoothly with the rookie's own pick number
+    instead of only their draft round.
     """
     picks = current_draft_picks[current_draft_picks["position"].isin(POSITION_VET_FEATURES)].copy()
-    picks["round_bucket"] = _round_bucket(picks["round"])
-    picks = picks.merge(rookie_averages, on=["position", "round_bucket"], how="left")
-    picks = picks.rename(
-        columns={"rookie_ppg": "ppg_pred", "rookie_games": "games_est", "gsis_id": "player_id"}
+    picks = picks.merge(rookie_curve, on="position", how="left")
+    log_pick = np.log(picks["pick"])
+    picks["ppg_pred"] = (picks["ppg_intercept"] + picks["ppg_slope"] * log_pick).clip(lower=0)
+    picks["games_est"] = (picks["games_intercept"] + picks["games_slope"] * log_pick).clip(lower=0, upper=17)
+    picks = picks.rename(columns={"gsis_id": "player_id"})
+    return picks.drop(columns=["ppg_intercept", "ppg_slope", "games_intercept", "games_slope", "n"])
+
+
+def _round_bucket(round_num: pd.Series) -> pd.Series:
+    """Collapse draft round into 1/2/3/4/'5-7' buckets - rounds 5-7 ("Day 3")
+    grouped together since per-round sample sizes get noisy fast that deep.
+    Used only for the outcome-range display below, where a real grouped
+    sample of actual outcomes is what's wanted (unlike the point-estimate
+    curve above, a percentile isn't something you want to extrapolate from
+    a smooth fit).
+    """
+    return round_num.clip(upper=5).map({1: "1", 2: "2", 3: "3", 4: "4", 5: "5-7"})
+
+
+def compute_rookie_outcome_range(rookie_table: pd.DataFrame) -> pd.DataFrame:
+    """Historical 10th/90th percentile rookie-season PPG by position and
+    draft round - real spread, not a discount.
+
+    Tested (and rejected) using a rookie-specific uncertainty discount on
+    the point estimate itself: checked whether the outcome distribution at
+    the top of the RB draft is right-skewed (a handful of stars like
+    Barkley/Elliott inflating an unrepresentative mean) - it isn't. For RB
+    picks 1-15 (2010-2025, n=12) mean and median are essentially identical
+    (13.54 vs 13.60 ppg, skew -0.20, actually slightly LEFT-skewed) - the
+    point estimate is already a fair summary of the typical outcome, not
+    one a few outliers are dragging up. Also tested whether a competing
+    established teammate on the roster (comp_max, a recency-weighted
+    "who's the strongest returning competitor" signal) should scale the
+    point estimate down: real and significant on pure opportunity share
+    (r=-0.155, p=0.011) but adds ~nothing once you already know draft pick
+    when tested on the actual predicted quantity, ppg (R² 0.392 -> 0.393,
+    noise-level) - pick number already implicitly captures most of what
+    roster crowding would tell you, so this was NOT shipped as a
+    ppg_pred adjustment.
+
+    Given both direct discount mechanisms came back unsupported, this
+    exposes the real spread as CONTEXT instead: a low/high band a human
+    can weigh against their own risk tolerance, rather than the model
+    silently shrinking the number for everyone. Genuinely gappy real-world
+    situational information this project doesn't have data for yet
+    (offensive line quality, expected game script, beat-reporter camp
+    intel) is exactly the kind of thing that SHOULD inform a call within
+    this range - it just can't be systematically modeled from what's
+    available here.
+    """
+    table = rookie_table.assign(round_bucket=_round_bucket(rookie_table["round"]))
+    ranges = (
+        table.groupby(["position", "round_bucket"])["ppg"]
+        .quantile([0.1, 0.9])
+        .unstack()
+        .rename(columns={0.1: "ppg_outcome_low", 0.9: "ppg_outcome_high"})
+        .reset_index()
     )
-    return picks
+    return ranges
+
+
+def add_rookie_outcome_range(rookies: pd.DataFrame, outcome_range: pd.DataFrame) -> pd.DataFrame:
+    """Attach ppg_outcome_low/high (see compute_rookie_outcome_range) to a
+    rookie board by position + draft round.
+    """
+    rookies = rookies.assign(round_bucket=_round_bucket(rookies["round"]))
+    rookies = rookies.merge(outcome_range, on=["position", "round_bucket"], how="left")
+    return rookies.drop(columns="round_bucket")
 
 
 RECENT_INJURY_THRESHOLD = 10
@@ -1130,6 +1452,150 @@ def evaluate_rankings(
     return pd.DataFrame(rows)
 
 
+TEAM_POSITION_CEILING = {"QB": 444.6, "RB": 570.3, "WR": 782.2, "TE": 460.9}
+"""The highest total fantasy points any single team's players at a position
+have EVER combined for in a season (2010-2025): QB 444.6 (2024 MIN), RB
+570.3 (2024 DET), WR 782.2 (2016 GB), TE 460.9 (2011 NE). Superseded by
+compute_team_position_ceiling as the default ceiling source (see its
+docstring) - kept only as the fallback for a team/position with no pace
+projection available (e.g. a relocated/expansion franchise with no play
+volume history to project from).
+"""
+
+EFFICIENCY_CEILING_PERCENTILE = 0.95
+
+
+def compute_efficiency_ceiling(season_stats: pd.DataFrame, rosters: pd.DataFrame, play_volume: pd.DataFrame) -> dict:
+    """The 95th-percentile historical points-per-team-attempt at each
+    position (2010-2025): how many fantasy points a team's players at a
+    position combined for, per rush attempt (RB) or per pass attempt
+    (QB/WR/TE) that team actually ran that season. A generous but bounded
+    real efficiency rate - the 95th percentile of real team-seasons, not an
+    unbounded "best case."
+    """
+    team_by_season = _team_by_season(rosters)
+    ss = season_stats.merge(team_by_season, on=["player_id", "season"], how="inner")
+    ss = ss.assign(total_points=ss["ppg"] * ss["games_played"])
+    team_totals = ss.groupby(["team", "season", "position"])["total_points"].sum().reset_index()
+
+    season_totals = (
+        play_volume.groupby(["team", "season"])
+        .agg(total_pass_plays=("pass_plays", "sum"), total_rush_plays=("rush_plays", "sum"))
+        .reset_index()
+    )
+    merged = team_totals.merge(season_totals, on=["team", "season"], how="inner")
+    merged["attempts"] = merged["total_rush_plays"].where(merged["position"] == "RB", merged["total_pass_plays"])
+    merged["pts_per_attempt"] = merged["total_points"] / merged["attempts"]
+    return merged.groupby("position")["pts_per_attempt"].quantile(EFFICIENCY_CEILING_PERCENTILE).to_dict()
+
+
+def compute_team_position_ceiling(
+    pace_pred: pd.DataFrame, efficiency_ceiling: dict, games: int = 17
+) -> pd.DataFrame:
+    """Team- and position-specific opportunity ceiling: a team's own
+    projected attempt volume (from project_team_pace) times a generous but
+    real, bounded per-attempt efficiency rate (compute_efficiency_ceiling) -
+    replaces the flat TEAM_POSITION_CEILING (the same historical all-time
+    max applied to every team regardless of how many plays they're actually
+    projected to run) with one that scales with a team's own real pace and
+    scheme.
+
+    This is what actually "wires in" the plays-per-game model (step 1) to
+    predictions: previously it was pure infrastructure, validated but
+    unused. Concretely fixes the flat cap's biggest blind spot: Arizona is a
+    pass-heavy team (65%+ pass rate) with comparatively little rushing
+    volume, so its real RB ceiling (~420 points) is well BELOW the flat
+    all-time-max (570) that applied equally to every team regardless of
+    tendency - while a run-heavy team like Baltimore or a run-committed
+    incoming-coach case like the Giants (see project_team_pace's HC-scheme
+    docstring) gets a HIGHER ceiling than the flat constant, since they
+    actually have the volume to support more combined RB production.
+    """
+    rows = []
+    for _, row in pace_pred.iterrows():
+        rush_attempts = row["plays_per_game_pred"] * (1 - row["pass_rate_pred"]) * games
+        pass_attempts = row["plays_per_game_pred"] * row["pass_rate_pred"] * games
+        rows.append(
+            {
+                "team": row["team"],
+                "RB": rush_attempts * efficiency_ceiling["RB"],
+                "QB": pass_attempts * efficiency_ceiling["QB"],
+                "WR": pass_attempts * efficiency_ceiling["WR"],
+                "TE": pass_attempts * efficiency_ceiling["TE"],
+            }
+        )
+    return pd.DataFrame(rows).melt(id_vars="team", var_name="position", value_name="ceiling")
+
+
+def apply_team_opportunity_cap(board: pd.DataFrame, team_ceiling: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Rescale a team's players at a position so their combined
+    `total_points_pred` never exceeds a real ceiling: `team_ceiling` (one
+    row per team/position, see compute_team_position_ceiling) if given,
+    falling back to the flat historical-max TEAM_POSITION_CEILING for any
+    team/position missing from it.
+
+    Every player's projection (veteran or rookie) is fit independently, so
+    nothing stops two players on the same team from each getting a real,
+    plausible-looking projection that together add up to something no real
+    team has ever produced - a team's offensive touches/targets are a
+    shared, roughly fixed pie, not an unlimited resource each player draws
+    from independently. Found via the 2026 board: Arizona's projected RB
+    corps (Jeremiyah Love + James Conner + Tyler Allgeier + depth) summed to
+    617 points - MORE than any team's RB group has ever scored in 15 years
+    of data (previous record: 570, 2024 Lions). Root cause was the rookie
+    curve (fit_rookie_curve) and the veteran model each producing a
+    standalone "if this player gets a normal share of playing time" number
+    with no awareness that a real, established teammate (freshly re-signed
+    Allgeier, incumbent starter Conner) was also projected for real
+    production on the very same roster.
+
+    Fix is a proportional scale-down, not a judgment call about WHICH player
+    is wrong: if a team/position group's summed total_points_pred exceeds
+    the ceiling, every player in that group is scaled down by the same
+    ratio, preserving each player's relative share of the (corrected) pie.
+    `games_est` (durability) is left untouched - the correction is about
+    diluted PER-GAME usage from real shared competition, not about how many
+    games anyone plays - so `ppg_pred` absorbs the whole adjustment and
+    `total_points_pred` is recomputed from the scaled `ppg_pred` * the
+    original `games_est`.
+    """
+    board = board.copy()
+    ceiling = board["position"].map(TEAM_POSITION_CEILING)
+    if team_ceiling is not None:
+        specific = board.merge(team_ceiling, on=["team", "position"], how="left")["ceiling"]
+        specific.index = board.index
+        ceiling = specific.fillna(ceiling)
+    team_totals = board.groupby(["team", "position"])["total_points_pred"].transform("sum")
+    scale = (ceiling / team_totals).clip(upper=1.0)
+    board["ppg_pred"] = board["ppg_pred"] * scale
+    board["total_points_pred"] = board["ppg_pred"] * board["games_est"]
+    return board
+
+
+MAN_GAMES_DEPTH_MULTIPLIER = {"QB": 1.06, "RB": 1.11, "TE": 1.10, "WR": 1.08}
+
+FLEX_ALLOCATION = {"RB": 0.16, "WR": 0.79, "TE": 0.05}
+"""How much of each flex slot's replacement-depth credit goes to RB/WR/TE.
+
+Previously a flat 45/45/10 rule of thumb. Measured empirically instead:
+for every REG-season week 2010-2025, locked in the top teams*slots players
+at each of RB/WR/TE by that week's realized fantasy points as dedicated
+starters, then looked at the next teams*flex_slots best remaining RB/WR/TE
+players (who'd actually fill the flex spot that week) and tallied their
+position. Over the last 10 seasons (2016+): WR takes ~79% of flex value,
+RB ~16%, TE ~4% (rounded up slightly here since TE has grown post-2023) -
+WR dominates because the position stays productive much deeper down the
+list (WR40 can still have a real week), while usable RB and TE production
+falls off a cliff right after the dedicated starter slots. This actually
+reverses the naive 45/45/10 assumption for RB specifically: it shrinks
+RB's flex credit rather than granting it a near-equal share, which lowers
+RB's replacement rank (fewer effective bodies count) and evenly increases
+every RB's VBD - consistent with RB being the scarcer, more front-loaded
+position in redraft value, and with real ADP behavior (RBs go early
+precisely because so few remain useful past the top of the position).
+"""
+
+
 def compute_vbd(
     board: pd.DataFrame,
     teams: int = 12,
@@ -1147,9 +1613,9 @@ def compute_vbd(
     similarly-projected WR12 in a deep one, and raw points alone can't tell
     you that.
 
-    Flex slots are split across RB/WR/TE using a standard rule of thumb (most
-    flex starts go to RB/WR, TE less often) - override the defaults if your
-    league's roster requirements differ.
+    Flex slots are split across RB/WR/TE using FLEX_ALLOCATION, an empirical
+    split rather than a rule-of-thumb guess (see its own docstring below) -
+    override the defaults if your league's roster requirements differ.
 
     Note on QB: a naive teams*qb_slots replacement rank (QB12 in a standard
     12-team league) already produces top-5 QB VBD in the 40-80 range cited by
@@ -1161,6 +1627,30 @@ def compute_vbd(
     baseline smaller and VBD LARGER, the opposite of the intended effect.
     Deliberately not "fixed" further since the naive formula already matches
     the reference range without adjustment.
+
+    Man-games replacement depth (MAN_GAMES_DEPTH_MULTIPLIER): the static
+    teams*slots rank assumes exactly that many players are needed all
+    season, but real rosters churn through more bodies than that because
+    even the best players at a position miss games (byes, injuries) - so the
+    TRUE freely-available replacement level sits a bit deeper than the
+    static count. Measured directly from this project's own season_stats
+    (2010-2025): for each season, took the top teams*slots players at each
+    position by realized total points, and averaged what fraction of a
+    17-game season they actually played. RB players who make the cut still
+    only average ~90% game availability (2016+: 89.9%), WR ~92%, TE ~91%,
+    QB ~95% (QBs are hurt less and rarely committee'd) - i.e. even "the
+    guys good enough to matter" miss real time, so a full season of
+    starter-quality man-games requires roughly 1/availability as many
+    rostered bodies as the naive slot count. Multipliers are that ratio
+    (1/availability, 2016+ seasons): QB 1.06, RB 1.11, TE 1.10, WR 1.08 -
+    RB deepens the most, matching RB's well-known injury volatility.
+    Deliberately NOT the much larger (3-5x) ratio you'd get from counting
+    every player who ever had one boom week in the starter tier - that
+    conflates real rostered depth with one-off waiver-wire flukes and
+    would blow the replacement bar out to an implausible depth. This
+    correctly compounds with (not fights) the QB note above: QB's own
+    multiplier is the smallest of the four, so QB's already-validated
+    replacement level barely moves.
     """
     board = board.copy()
     board["position_rank"] = board.groupby("position")["total_points_pred"].rank(
@@ -1168,10 +1658,10 @@ def compute_vbd(
     )
 
     replacement_rank = {
-        "QB": teams * qb_slots,
-        "RB": teams * (rb_slots + flex_slots * 0.45),
-        "WR": teams * (wr_slots + flex_slots * 0.45),
-        "TE": teams * (te_slots + flex_slots * 0.10),
+        "QB": teams * qb_slots * MAN_GAMES_DEPTH_MULTIPLIER["QB"],
+        "RB": teams * (rb_slots + flex_slots * FLEX_ALLOCATION["RB"]) * MAN_GAMES_DEPTH_MULTIPLIER["RB"],
+        "WR": teams * (wr_slots + flex_slots * FLEX_ALLOCATION["WR"]) * MAN_GAMES_DEPTH_MULTIPLIER["WR"],
+        "TE": teams * (te_slots + flex_slots * FLEX_ALLOCATION["TE"]) * MAN_GAMES_DEPTH_MULTIPLIER["TE"],
     }
 
     replacement_points = {}
