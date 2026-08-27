@@ -1686,3 +1686,44 @@ not a real projection error on our side, given how they've actually performed. I
 from this project's own walk-forward evidence, that's worth an explicit, separate conversation (not a rule to
 quietly override) - flagging rather than resolving unilaterally.
 
+
+
+### 2026-08-27 Ã¢â‚¬â€ RB/WR overrating investigation: closed, no fix needed
+
+Follow-up to the TE role-security-discount work: user asked to look at the same "we rank bench players way
+above FantasyPros" pattern for RB/WR. Checked using the same real-outcomes standard (not market opinion) this
+session already established.
+
+**The already-shipped ROLE_SECURITY_DISCOUNT is well-calibrated exactly where real data exists.** Graded the
+real, walk-forward actual/predicted ppg ratio by EXACT depth_chart_rank (not just the >=3 gate bucket):
+RB rank1=1.11 (slightly under-predicted), rank2=1.01 (no real bias - committee RB2s keep real value, matches
+why the gate starts at 3 not 2), rank3=0.78 (matches the shipped discount exactly). WR: rank1=1.05, rank2=0.90
+(mild), rank3=0.78 (matches shipped discount). Clean, monotonic, consistent with what's already live.
+
+**The remaining gap for very deep bench players (JuJu Smith-Schuster, Lil'Jordan Humphrey, Jaylin Lane - rank
+5-7, still large FantasyPros rank gaps despite already being discounted) hits a genuine DATA WALL, not a
+modeling gap**: zero historical week-1/2 depth-chart observations exist at rank>=4 for RB or WR anywhere in
+2010-2025 (`nfl.load_depth_charts()`) - teams' official early-season depth charts don't reliably get listed
+that deep. There is no ground truth to validate a steeper cut against, full stop.
+
+Tried routing around that gap with `prev_snap_share_level` instead (continuous, doesn't have the same rank-
+depth sparsity problem) - it does NOT support going any steeper either: even the bottom 0-10% snap-share
+bucket only shows ratio 0.85 (RB) / 0.85 (WR), nowhere near the 0.3-0.5 range FantasyPros' ranking gap would
+imply. The bias plateaus rather than continuing to crater - same lesson as the already-documented Freiermuth/
+Tremble TE case: FantasyPros' consensus rank appears to overreact to obscure, deep-bench names beyond what
+real production actually supports, not track something our model is missing.
+
+**Rank-1/rank-2 gaps** (Jerry Jeudy, Tony Pollard, Zach Charbonnet, Tyrone Tracy Jr., Deebo Samuel, Darius
+Slayton, Samaje Perine, Woody Marks, RJ Harvey) - all sit in the "no real bias" (ratio >=0.87) zone of the
+graded table above, so there's no evidence-based case for discounting them. Checked whether this is a rookie-
+specific pattern (given several sound like recent rookies) - it isn't: only Jordyn Tyson of this whole list is
+actually a 2026 rookie, everyone else is an established veteran, ruling out a rookie-curve explanation.
+
+**Conclusion: no RB/WR-equivalent fix to make.** The role-security discount mechanism already generalizes
+correctly across positions and is calibrated at the real ceiling of available evidence. Remaining gaps are
+either (a) the already-documented team=NaN data gap (unresolved current team in nflverse/Sleeper, a separate,
+known issue - see the earlier NaN-cap-bug entry), or (b) defensible model-vs-market disagreement that the
+data doesn't support chasing, matching this project's now-established discipline of using market gaps as a
+diagnostic prompt, not a target to fit (per the user's own explicit framing this session). Closed - no code
+changes from this investigation.
+
