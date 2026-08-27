@@ -27,6 +27,7 @@ from ffmodel.season import (
     add_rookie_outcome_range,
     add_strength_of_schedule_features,
     apply_current_team_from_sleeper,
+    apply_qb_role_upgrade_boost,
     apply_role_security_discount,
     build_enriched_weekly,
     build_head_coach_history,
@@ -157,7 +158,7 @@ def main() -> None:
     vet_board = vet_board[
         ["player_id", "player_display_name", "position", "team", "age", "team_changed",
          "new_head_coach", "new_hc_prior_team_ppg", "prev_snap_share_trend", "prev_snap_share_level",
-         "cap_percent", "sos_pts_allowed_pg", "ppg_pred", "games_est", "total_points_pred"]
+         "cap_percent", "sos_pts_allowed_pg", "ppg_pred", "games_est", "total_points_pred", "prev_games_played"]
     ]
     vet_board["is_rookie"] = 0
     print(f"  {len(vet_board):,} returning players projected")
@@ -184,6 +185,10 @@ def main() -> None:
     # Rookie contracts are small/not yet in the contract data source - 0 is
     # a reasonable placeholder (no established veteran-scale investment yet).
     rookie_board["cap_percent"] = 0
+    # No prior NFL season exists for a true rookie - NaN here correctly
+    # makes apply_qb_role_upgrade_boost's prev_games_played<8 check a no-op
+    # for rookies (they're handled by the separate rookie curve entirely).
+    rookie_board["prev_games_played"] = pd.NA
     # Unlike snap share/contract history, SOS only needs (team, season,
     # position) - not the player's own prior-season history - so it applies
     # to rookies just as well as veterans (rookies already have a team from
@@ -194,7 +199,7 @@ def main() -> None:
         ["player_id", "player_display_name", "position", "team", "age", "team_changed",
          "new_head_coach", "new_hc_prior_team_ppg", "prev_snap_share_trend", "prev_snap_share_level",
          "cap_percent", "sos_pts_allowed_pg", "ppg_pred", "games_est", "total_points_pred", "is_rookie",
-         "ppg_outcome_low", "ppg_outcome_high"]
+         "ppg_outcome_low", "ppg_outcome_high", "prev_games_played"]
     ]
     print(f"  {len(rookie_board):,} rookies projected")
 
@@ -241,6 +246,7 @@ def main() -> None:
 
     print("Applying role-security discount for players with no current-depth-chart security...")
     board = apply_role_security_discount(board)
+    board = apply_qb_role_upgrade_boost(board)
 
     oc_path = COACHING_DIR / f"offensive_coordinators_{args.draft_season}.csv"
     if oc_path.exists():

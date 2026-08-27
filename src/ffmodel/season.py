@@ -1688,6 +1688,70 @@ def apply_role_security_discount(board: pd.DataFrame) -> pd.DataFrame:
     return board
 
 
+QB_ROLE_UPGRADE_MIN_GAMES = 8
+QB_ROLE_UPGRADE_BOOST = 3.45
+
+
+def apply_qb_role_upgrade_boost(board: pd.DataFrame) -> pd.DataFrame:
+    """Boost ppg_pred/total_points_pred for a QB who is the CURRENT starter
+    (depth_chart_rank == 1) despite a thin trailing track record
+    (prev_games_played < QB_ROLE_UPGRADE_MIN_GAMES) - the complement of
+    apply_role_security_discount, using the same live-updatable
+    depth_chart_rank signal.
+
+    Found 2026-08-27 investigating why Malik Willis (MIA's nominal 2026
+    starter per the current depth chart, but a career backup with a thin,
+    mostly-bad multi-year track record - 2/7/6/4 games played 2022-2025)
+    ranked far below FantasyCalc's real trade-value market (their rank 146
+    vs our ~648). The trailing-stats-only wavg_ features have no way to see
+    that a player has just WON a starting job - a backup who takes over
+    (via injury, benching, or a real camp competition) typically
+    outperforms what their own limited-snap history alone would predict,
+    since even a mediocre STARTING quarterback gets far more fantasy-
+    relevant volume than a good backup ever does - QB is uniquely binary
+    this way (RB/WR/TE roles are far more graduated/continuous, which is
+    exactly why the same test came back null for those three positions -
+    see below).
+
+    Walk-forward tested (2018-2025, using the same contemporaneous week-1/2
+    depth chart data as apply_role_security_discount, not last season's -
+    a player's CURRENT role, known at prediction time): QB starters with
+    prev_games_played < 8 are underpredicted by +3.57 ppg on average vs
+    +0.76 ppg for starters with a normal track record (p=0.005, n=33 vs
+    176) - a real, large, QB-specific effect. The SAME test for RB/WR/TE
+    found no significant difference (p=0.24/0.32/0.85) - matches the
+    "QB is uniquely all-or-nothing" reasoning above, so this boost is QB-
+    only, not applied to other positions.
+
+    Calibrated the boost magnitude on 2018-2022 (mean resid +3.452) and
+    validated out-of-sample on 2023-2025: the SAME bias was still present
+    and significant before correction (mean resid +3.844, p=0.031), and
+    applying the calibration-set boost to the held-out validation set
+    left it well-centered (mean +0.391, p=0.80) - a real, generalizable
+    effect, not an artifact of one player's game log. Checked whether the
+    boost should scale with severity (how few games the player's own
+    history shows) rather than being flat - no support for that (r=-0.26,
+    p=0.14, n=33 - too weak/underpowered to trust a graded version over a
+    simple flat one).
+
+    This is exactly the kind of situation this pipeline needs to keep
+    getting right automatically as real 2026 games are played: an in-
+    season injury or benching that hands a backup the starting job should
+    trigger this boost the next time depth charts/rosters are re-pulled,
+    without needing another manual investigation.
+    """
+    board = board.copy()
+    upgraded = (
+        (board["position"] == "QB")
+        & (board["depth_chart_rank"] == 1)
+        & (board["prev_games_played"] < QB_ROLE_UPGRADE_MIN_GAMES)
+    ).fillna(False)
+
+    board.loc[upgraded, "ppg_pred"] = board.loc[upgraded, "ppg_pred"] + QB_ROLE_UPGRADE_BOOST
+    board["total_points_pred"] = board["ppg_pred"] * board["games_est"]
+    return board
+
+
 def apply_team_opportunity_cap(board: pd.DataFrame, team_ceiling: pd.DataFrame | None = None) -> pd.DataFrame:
     """Rescale a team's players at a position so their combined
     `total_points_pred` never exceeds a real ceiling: `team_ceiling` (one
