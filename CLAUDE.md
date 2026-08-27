@@ -2056,3 +2056,51 @@ correctly exclude established-starter-with-recent-injury cases like Murray. Ever
 specific, testable claim and a real result, including two rejected framings (broad games_est deweighting;
 naively extending the flat replacement to Murray-style cases) reported honestly rather than silently dropped.
 
+
+
+### 2026-08-27 Ã¢â‚¬â€ rate-side (ppg_pred) role-upgrade fix recalibrated; found and fixed the same Murray-inclusion bug
+
+Follow-up to the games_est redesign: tested whether the RATE side (`apply_qb_role_upgrade_boost`) had the same
+"patch an uninformative base" architectural flaw just found and fixed on the durability side.
+
+**Different diagnosis than durability - wavg_ppg is NOT uninformative, unlike wavg_games_played.** Tested
+directly on the refined (Murray-style-excluded) role-upgrade cohort: correlation(wavg_ppg, actual future ppg)
+= 0.656 pooled (p<0.0001), real signal - the opposite of the durability finding (r=0.057). So a full "replace,
+don't patch" redesign was NOT the right move here; an additive correction is still the right shape.
+
+**But found a real, separate bug: the rate boost was calibrated on the SAME unrefined cohort the durability
+fix originally used, before add_prior_starter_season_flag existed** - meaning Kyler Murray (an established
+starter with a full 2024 season, just hurt in 2025) was mixed into the calibration data, AND was silently
+getting the rate boost applied on the live board (his ppg_pred was 14.70 = raw model 11.24 + the old +3.45
+boost) despite being exactly the kind of case add_prior_starter_season_flag exists to exclude. Re-derived the
+constant on the correctly-narrowed cohort: the real bias is +6.63 ppg for a clean-injury-history QB (p=0.002,
+n=12) - substantially BIGGER than the old +3.45, confirming Murray-style cases were diluting the original
+number toward zero. Calibrate(2018-2022)/validate(2023-2025): 4.86 -> 5.32, held up out-of-sample (validation
+p=0.061, borderline given the now-smaller refined sample but consistent in sign/magnitude). Final constant
+(QB_ROLE_UPGRADE_BOOST = 5.02) is the full pooled mean on the refined cohort.
+
+Tested whether to split this by injury history too (matching the durability fix) - the "had injury" sub-group
+(n=6) isn't independently significant (p=0.45) at this sample size, so kept a single pooled constant rather
+than force an unsupported split just for consistency. Re-confirmed RB/WR/TE remain not significant for this
+pattern on the refined cohort too (WR p=0.46, TE p=0.15) - still QB-only, unchanged from the original finding.
+
+Added the `had_real_starter_season` exclusion to `apply_qb_role_upgrade_boost`'s trigger condition (same flag
+already built for the durability fix) and reordered the pipeline in build_draft_rankings.py so
+`add_prior_starter_season_flag` runs before the rate boost, not just the durability one.
+
+**Verified on the board**: Malik Willis reached his best result across this entire multi-round investigation -
+ppg_pred 8.30 (original) -> 13.32 (final), games_est 4.56 -> 11.0, total_points_pred 54 -> 146.5, overall rank
+~648 -> 297 (PPR). Kyler Murray's ppg_pred correctly dropped from the inflated 14.70 back to 11.25 (raw model +
+his own validated QB-specific bounce-back correction only, no role-upgrade boost of any kind) - the honest,
+evidence-based outcome, not a regression, matching the already-established finding that his specific injury
+severity doesn't warrant extra credit. QB Spearman vs FantasyCalc moved to 0.586 (down slightly from 0.665) -
+expected and correct: Murray losing an inappropriate boost moves him away from the market's optimistic view of
+him, which is the right outcome given this project's standing discipline of using market gaps as a diagnostic,
+not a target to match.
+
+**Closes out the Malik Willis investigation for now**: six real, independently-tested-and-validated fixes
+across two full rounds (QB-specific bounce-back, rate role-upgrade boost, QB starter floor on VBD, durability
+role-upgrade replacement, the starter-season exclusion applied to both role-upgrade functions) took him from
+rank ~648/total_points_pred~54 to rank 297/total_points_pred~146.5 - a real, defensible, evidence-driven
+result, not a name-targeted patch.
+

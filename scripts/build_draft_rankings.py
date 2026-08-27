@@ -250,9 +250,9 @@ def main() -> None:
 
     print("Applying role-security discount for players with no current-depth-chart security...")
     board = apply_role_security_discount(board)
-    board = apply_qb_role_upgrade_boost(board)
     board = add_recent_injury_history_flag(board, injuries, args.draft_season)
     board = add_prior_starter_season_flag(board, season_stats, args.draft_season)
+    board = apply_qb_role_upgrade_boost(board)
     board = apply_role_upgrade_durability_boost(board)
 
     oc_path = COACHING_DIR / f"offensive_coordinators_{args.draft_season}.csv"
