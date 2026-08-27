@@ -26,9 +26,13 @@ from ffmodel.season import (
     add_offensive_coordinator_context,
     add_rookie_outcome_range,
     add_strength_of_schedule_features,
+    add_prior_starter_season_flag,
+    add_recent_injury_history_flag,
     apply_current_team_from_sleeper,
     apply_qb_role_upgrade_boost,
+    apply_qb_starter_floor,
     apply_role_security_discount,
+    apply_role_upgrade_durability_boost,
     build_enriched_weekly,
     build_head_coach_history,
     build_prediction_features,
@@ -247,6 +251,9 @@ def main() -> None:
     print("Applying role-security discount for players with no current-depth-chart security...")
     board = apply_role_security_discount(board)
     board = apply_qb_role_upgrade_boost(board)
+    board = add_recent_injury_history_flag(board, injuries, args.draft_season)
+    board = add_prior_starter_season_flag(board, season_stats, args.draft_season)
+    board = apply_role_upgrade_durability_boost(board)
 
     oc_path = COACHING_DIR / f"offensive_coordinators_{args.draft_season}.csv"
     if oc_path.exists():
@@ -275,6 +282,7 @@ def main() -> None:
         te_slots=args.te_slots,
         flex_slots=args.flex_slots,
     )
+    board = apply_qb_starter_floor(board)
     board = board.sort_values("vbd", ascending=False)
     board = board.round(2)
 

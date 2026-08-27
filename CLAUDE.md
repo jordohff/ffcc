@@ -1857,3 +1857,202 @@ diagnosis that his issue is real decline, not a role-upgrade case). QB Spearman 
 0.589 -> 0.613; QB's own backtest (which doesn't include this board-build-time adjustment, same as the
 existing role-security-discount/team-opportunity-cap) is unaffected, still 0.732.
 
+
+
+### 2026-08-27 Ã¢â‚¬â€ role-upgrade durability boost shipped (all positions) - the biggest correction in this pipeline
+
+User pushed on Malik Willis's games_est specifically (4.56/17 despite being MIA's real, contract-backed starter)
+and made a broader point: games_est leans too hard on a player's own multi-year games-played history, which is
+a genuinely hard, noisy signal to predict year over year and should probably be deweighted for players whose
+SITUATION has changed. Tested this directly rather than taking the diagnosis on faith.
+
+**Root cause, confirmed real and enormous**: a player's own historical games_played conflates two different
+things - AVAILABILITY (would they have played if given the chance - the thing wavg_games_played is supposed to
+measure) and OPPORTUNITY (were they actually given the chance) - and for a backup who's just become the
+CURRENT starter, their own thin history reflects the latter (role), not the former (durability). The existing
+bounce-back correction (and its QB-specific variant shipped earlier this session) treats ALL low-games players
+the same way regardless of WHY their games were low, which is wrong for this specific, common case.
+
+Walk-forward tested (2018-2025) the residual AFTER the already-shipped bounce-back correction (checked against
+the corrected estimate specifically, to avoid double-counting with that fix, since a role-upgrade player's low
+prev_games_played usually also triggers it) for the cohort: CURRENT depth_chart_rank==1 (contemporaneous week-
+1/2 snapshot, same methodology as every other role-transition fix this session) with prev_games_played<8. The
+remaining bias is real and huge at every position - by far the largest correction in this whole pipeline: QB
++4.51 games (p=7e-8, n=57), RB +4.11 (p=5e-5, n=29), WR +3.44 (p=3e-7, n=56), TE +2.16 games (p=0.003, n=46).
+Pooled calibrate(2018-2022)/validate(2023-2025): calibration mean +3.41, validation mean +4.72 - GREW out-of-
+sample rather than shrinking (real signal, not overfitting), validation p=0.0006.
+
+Shipped `apply_role_upgrade_durability_boost` (season.py) - position-specific additive boost to games_est
+(ROLE_UPGRADE_GAMES_BOOST: QB 4.51, RB 4.11, WR 3.44, TE 2.16) for the same cohort, capped at 17 games. Applied
+right after the existing role-transition functions (role-security discount, QB rate boost), before the team
+opportunity cap. Uses the same live depth_chart_rank + prev_games_played signals already on the board - stays
+correct automatically as real in-season promotions happen, without another manual investigation, directly
+addressing the "get this right for live updates" requirement from earlier this session.
+
+**Verified on the board, both scoring formats**: Kyler Murray games_est 9.20 -> 13.71 (+4.51 exact),
+total_points_pred 135->201, overall rank 348 -> 164/177 (PPR/half-PPR) - a real, substantial, honestly-earned
+jump much closer to FantasyCalc's real market rank (129). Malik Willis games_est 4.56 -> 9.07 (+4.51),
+total_points_pred 54 -> 107, rank 639 -> 605/629 - improved but stays modest, correctly reflecting that his
+own track record really is thinner/more uncertain than Murray's established-then-injured career (this is the
+right, non-uniform outcome - the boost is calibrated to the AVERAGE bias for this cohort, not to erase all
+uncertainty for every individual case). Kirk Cousins correctly untouched (his 2025 had 10 games, doesn't meet
+the <8 threshold - his issue, already diagnosed, is genuine age-related decline, a different pattern). QB
+Spearman vs FantasyCalc improved further: 0.613 -> 0.672. WR also improved (0.791 -> 0.817, since this fix is
+position-general and caught real WR role-upgrade cases too, not just the QB cases that prompted it). RB/TE
+Spearman unchanged (no major role-upgrade mismatches in those positions' FantasyCalc-matched subset this
+round).
+
+**Verified Willis's real-world situation via web search** (addressing the user's ask to support depth-chart
+data with news research, at least as a spot-check): confirmed via ESPN/ArenaBox news coverage that Willis
+signed a real 3-year, $67.5M contract with Miami this offseason and is regarded as the starter "not in
+danger" for 2026, even sitting only in the 24-28 range among the league's 32 starters per one outlet's
+ranking - both facts consistent with what's now on the board (a real but modest starter, not previously
+elite). Separately checked whether the contract signal itself had already picked up this deal (a prior session
+found and fixed a similar lagged-vs-contemporaneous contract bug) - it had: `contract_history.parquet` shows
+Willis's cap_percent jumping from 0.005 (2025) to 0.018 (2026), ramping to 0.079 by 2027 - a real, backloaded
+"prove-it" structure, not a data-staleness bug. No additional contract fix needed.
+
+**Not built this round, flagged for a future scoping conversation**: a systematic, automated news-scraping
+pipeline to independently verify/supplement nflverse's live depth-chart pull. The one-off spot-check above
+worked well and is worth repeating whenever a specific player's depth-chart status is in question, but a real
+automated system (reliable source selection, parsing "who's the starter" out of prose, a review/override
+mechanism for disagreements with nflverse) is a genuine infrastructure project, not a bolt-on - deserves its
+own dedicated design discussion before building, not attempted here.
+
+
+
+### 2026-08-27 Ã¢â‚¬â€ QB starter floor (structural VBD fix) + injury-history-aware role-upgrade split
+
+Continuation of the Malik Willis investigation. User's pushback after the first two role-upgrade fixes: "it
+still doesn't feel right" - correctly identified two more distinct problems, tested separately.
+
+**Problem 1 (structural, real, fixed): a real starter can rank below players who will never play a snap.**
+Checked Willis's ABSOLUTE total_points_pred (107) against real historical QB seasons with 12+ games started
+(2010-2025) - it's not actually unrealistic (10th percentile of that real population is 168.8 points; even the
+worst seasons on record, Jimmy Clausen 2010/Derek Anderson 2010, cleared 58-90). The bug is entirely in
+cross-position VBD SUBTRACTION: QB's replacement level sits at ~254 points (naive QB13, separately validated
+for the TOP of the position against real VORP ranges), so any below-replacement-but-real starter lands a huge
+negative VBD that sorts into the same overall-rank neighborhood as a WR11 with ~5-10 total points - a 10x+
+real production gap invisible to linear same-bar VBD subtraction. Real, structural, QB-specific: a real QB1
+plays ~100% of snaps whenever active (unlike RB/WR/TE, where even a nominal "starter" is often a committee) -
+depth_chart_rank==1 is a much stronger guarantee at QB than at any other position, which is why this fix does
+NOT automatically generalize to RB/WR/TE (their own version, if warranted, would need deriving from THEIR real
+snap share, not assumed to carry the same logic/magnitude - flagged as a distinct follow-up, not attempted).
+
+Shipped `apply_qb_starter_floor` (season.py): any current depth_chart_rank==1 QB gets a minimum VBD, floor
+expressed as QB_STARTER_FLOOR_PPG (11.90, the 10th-percentile PPG among real 12+-game QB seasons) times the
+player's OWN games_est - deliberately a PER-GAME floor, not a flat season-total one, so it composes correctly
+with whatever games_est the model has already (validly) settled on rather than assuming a full season for
+everyone. Does not touch total_points_pred/ppg_pred/games_est directly - a ranking/comparison-mechanism fix,
+not a claim the underlying estimate was wrong.
+
+**Verified precisely, and this revealed WHY Willis specifically barely moved**: Kirk Cousins jumped hugely
+(rank 631 -> 396) since his own rate (8.83 ppg) sits well below the 11.90 floor. Kyler Murray unaffected
+(14.69 ppg already clears the floor, correctly a no-op). Willis's own rate (11.75) was already almost exactly
+AT the floor rate (11.90) - floor_total (107.9) vs his actual (106.6) - so the floor only lifted him ~1 VBD
+point. This precisely diagnosed that his REMAINING suppression was durability (games_est), not the VBD bug -
+which the user then correctly kept pushing on.
+
+**Problem 2 (real, refined): games_played history conflates bench time with injury, and this matters even
+within the already-shipped role-upgrade fix.** User's sharper ask: assess Willis's actual injury history
+before assuming his low games_played reflects durability risk at all - "not because he was riding pine on the
+bench." Checked directly (`data/raw/injuries.parquet`): Willis has essentially NO real injury history - one
+minor late-2025 "Questionable - Shoulder" tag (a routine game-status designation, not evidence of a real
+injury), nothing serious/Out/Doubtful/IR ever. His entire limited career playing time is pure backup-era role,
+never injury.
+
+Tested whether this generalizes as a real, fittable signal within the already-shipped role-upgrade cohort
+(current starter, thin trailing history): built `had_real_injury` (a serious Out/Doubtful/IR tag - NOT the
+routine Questionable tag - in the player's own most recent season) and split the cohort. Real, significant
+split at every position: "healthy scratch" players (no real injury history, matching Willis) are underpredicted
+MORE than the pooled average already shipped (QB +5.07 vs the prior pooled +4.51, p=1e-5, n=35; RB +5.37,
+p=0.0005, n=15; WR +3.50, p=6e-5, n=30; TE +3.00, p=0.0006, n=30), while players who DID have a real injury tag
+in their thin recent season are underpredicted less (QB +3.62, p=0.002, n=22; RB +2.75, p=0.04, n=14; WR +3.36,
+p=0.001, n=26; TE +0.57, NOT significant, p=0.67, n=16) - a real, generalizable distinction, strongest at
+TE/RB, weakest (barely differentiated) at WR.
+
+Replaced the single pooled `ROLE_UPGRADE_GAMES_BOOST` with `ROLE_UPGRADE_GAMES_BOOST_HEALTHY`/
+`ROLE_UPGRADE_GAMES_BOOST_INJURY_HISTORY` (season.py), gated by the new `had_real_injury` flag
+(`add_recent_injury_history_flag`, using the target season's own prior-season injury report - contemporaneous,
+matching the rest of this session's role-transition-signal convention). Willis: games_est 9.07 -> 9.63
+(+0.56, matches the delta between the healthy and pooled constants exactly).
+
+**Honest final state, reported plainly rather than force-fit further**: after FOUR distinct, independently-
+validated corrections (QB-specific bounce-back, QB role-upgrade rate boost, role-upgrade durability boost now
+split by injury history, and the QB starter floor), Willis's board position improved meaningfully but remains
+low (PPR: rank ~605 -> ~528; total_points_pred 107 -> 113). The remaining suppression is now genuinely a RATE
+question, not durability or a VBD artifact - his own model-predicted ppg (11.75) sits almost exactly at the
+QB_STARTER_FLOOR_PPG bar (11.90), i.e. "replacement-level bad-starter" territory, and no further evidence has
+been found (cap_percent/job-security interaction: tested, null, p=0.59; rushing-volume interaction: tested,
+null, p=0.88) to justify pushing his RATE higher without inventing an unsupported correction - which this
+project has repeatedly caught and reverted before (age x elite interaction, TE low-volume gate, McCaffrey
+old-injury pattern). This is now an honestly-reported, evidence-exhausted case, not an unexamined one - every
+concrete hypothesis raised (durability vs role, injury history, contract/job security, rushing floor) was
+tested on real data, not assumed.
+
+
+
+### 2026-08-27 Ã¢â‚¬â€ games_est redesigned from additive patch to direct replacement; population-level "assume full season" hypothesis tested and rejected
+
+User's response to the split-by-injury-history fix: "games_est just doesn't feel right... it is so hard to
+project who will and won't miss games that we need to assume all players will play all games (or... make the
+coefficient much smaller)." Two distinct claims - a broad, population-level one and a Willis-specific one -
+tested separately rather than reacting to either without evidence.
+
+**Broad claim tested and REJECTED**: is games_est over-discounting durability across the whole player
+population, such that assuming ~everyone plays a full season would do better? Tested directly, restricted to
+CURRENT STARTERS (the relevant comparison, not bench players): the existing shipped model is already close to
+unbiased (mean resid -0.24 games, MAE 2.94) and clearly beats a naive "assume every starter plays all 17"
+baseline (mean resid -3.74, MAE 3.74 - a real, ~27% worse error). Real starters really do miss real games on
+average, even setting aside any specific injury signal - broadly shrinking or removing the durability discount
+would make the model WORSE, not better. This is reported plainly as a rejected hypothesis, matching this
+project's standing discipline, even though it means partially disagreeing with the user's stated framing.
+
+**Narrow, Willis-specific claim tested and CONFIRMED, leading to a real architectural fix**: the "role-upgrade"
+cohort (current starter, thin trailing history) is a genuinely different population where the broad finding
+above doesn't apply. Tested directly: correlation(player's own prev_games_played, their real future games
+played) within this cohort is r=0.057, p=0.67 - completely uninformative. Comparing prediction error on a
+held-out validation set: a FLAT REPLACEMENT using the cohort's own empirical mean has MAE 3.906, vs MAE 6.979
+anchoring on the player's own wavg_games_played - the replacement is nearly twice as accurate. Conclusion: for
+this specific cohort, PATCHING the player's own history (what the previous two iterations of this fix did) was
+structurally the wrong shape of correction, not just imprecisely calibrated - the same reason rookies get a
+fully separate curve (fit_rookie_curve) instead of a patched veteran wavg_-based formula.
+
+Redesigned `apply_role_upgrade_durability_boost`: REPLACES games_est outright (not adds to it) with the direct
+empirical mean actual games_played for players in the same situation, split by injury history as before
+(ROLE_UPGRADE_GAMES_EST_HEALTHY/INJURY_HISTORY, season.py).
+
+**Real regression caught and fixed before shipping**: verifying the new version on the board found Kyler Murray
+(prev_games_played=5, from his 2025 injury) ALSO satisfied the "thin last season, current starter" trigger and
+got swept into the same flat replacement - but Murray is nothing like Willis: he had a full, healthy 17-game
+starter season as recently as 2024 (games history 11/8/17/5). Verified this distinction matters empirically:
+for players with a real starter season (>=13 games) anywhere in the 3-year lookback despite a thin most-recent
+one, their OWN wavg_games_played DOES correlate with their real outcome (r=0.198, p=0.059 - much stronger than
+the true role-upgrade cohort), and their actual mean games (12.14) tracks reasonably close to their own wavg
+estimate (9.08, still somewhat underestimated - exactly what the ALREADY-VALIDATED QB-specific bounce-back
+correction from earlier this session is designed to handle). Added `add_prior_starter_season_flag`
+(REAL_STARTER_SEASON_THRESHOLD=13 games) and excluded these players from the role-upgrade replacement
+entirely - they now correctly fall through to the standard estimate_games_played path. Constants refit on the
+correctly-narrowed cohort (values shifted slightly from the pre-exclusion version, all four positions/injury-
+history cells re-derived).
+
+**Verified on the board, both scoring formats**: Malik Willis reached his best result across this whole multi-
+round investigation - games_est 4.56 (original) -> 11.0 (final), total_points_pred 54 -> 129, overall rank 648
+-> 370 (PPR) - a real, substantial, and now correctly-targeted improvement. Kyler Murray correctly reverted to
+his QB-specific-bounce-back-corrected number (games_est 9.2, NOT swept into the role-upgrade replacement) -
+this is the number already separately validated earlier this session (moderate-severity QB injuries showed no
+bias needing extra correction), so this is the right, evidence-based outcome for him, not a regression. Kirk
+Cousins unaffected throughout (his own case, real 2-season age-related decline, was never part of any role-
+upgrade cohort).
+
+**Net summary of this whole Malik Willis investigation** (5 rounds of testing across this session): started at
+games_est=4.56/total_points_pred=54/rank~648. Fixes applied, in order, each validated against real outcomes
+before shipping: (1) QB-specific bounce-back constants (fixed a real bias affecting ALL recent-injury QBs, not
+Willis-specific), (2) QB role-upgrade rate boost (+3.45 ppg for current starters with thin history), (3) QB
+starter floor on VBD (fixed a structural cross-position comparison bug, not specific to Willis either), (4)
+role-upgrade durability correction - tried as an additive patch first (rejected/refined after the direct-
+replacement test showed it was structurally wrong), rebuilt as a direct replacement, then further refined to
+correctly exclude established-starter-with-recent-injury cases like Murray. Every step was driven by a
+specific, testable claim and a real result, including two rejected framings (broad games_est deweighting;
+naively extending the flat replacement to Murray-style cases) reported honestly rather than silently dropped.
+

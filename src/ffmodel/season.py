@@ -1752,6 +1752,196 @@ def apply_qb_role_upgrade_boost(board: pd.DataFrame) -> pd.DataFrame:
     return board
 
 
+ROLE_UPGRADE_MIN_GAMES = 8
+
+REAL_STARTER_SEASON_THRESHOLD = 13
+"""A season with at least this many games played counts as real evidence
+the player has actually held a starting-caliber role before - see
+add_prior_starter_season_flag and apply_role_upgrade_durability_boost's
+docstring for why this distinction matters.
+"""
+
+ROLE_UPGRADE_GAMES_EST_HEALTHY = {"QB": 11.00, "RB": 13.88, "WR": 12.00, "TE": 11.16}
+ROLE_UPGRADE_GAMES_EST_INJURY_HISTORY = {"QB": 9.75, "RB": 13.06, "WR": 11.09, "TE": 9.36}
+
+
+def add_recent_injury_history_flag(board: pd.DataFrame, injuries: pd.DataFrame, target_season: int) -> pd.DataFrame:
+    """Add `had_real_injury`: did this player appear on the OFFICIAL injury
+    report with a serious designation (Out, Doubtful, or IR) at any point in
+    `target_season - 1` - i.e. the same season prev_games_played already
+    looks back to. Deliberately excludes Questionable (a routine game-time
+    tag, not evidence of a real injury) - see apply_role_upgrade_durability_
+    boost's docstring for why this distinction matters for the role-upgrade
+    correction specifically.
+    """
+    serious = injuries[injuries["report_status"].isin(["Out", "Doubtful", "IR"])].dropna(subset=["gsis_id"])
+    had_injury = (
+        serious[serious["season"] == target_season - 1]
+        .drop_duplicates(subset="gsis_id")[["gsis_id"]]
+        .rename(columns={"gsis_id": "player_id"})
+    )
+    had_injury["had_real_injury"] = True
+    board = board.merge(had_injury, on="player_id", how="left")
+    board["had_real_injury"] = board["had_real_injury"].fillna(False).astype(bool)
+    return board
+
+
+def add_prior_starter_season_flag(board: pd.DataFrame, season_stats: pd.DataFrame, target_season: int) -> pd.DataFrame:
+    """Add `had_real_starter_season`: did this player have AT LEAST ONE
+    season with >= REAL_STARTER_SEASON_THRESHOLD games played anywhere in
+    the 3 seasons before `target_season` (the same lookback window used
+    elsewhere in this pipeline, e.g. add_weighted_history_features).
+
+    This is what separates two very different populations that a naive
+    "prev_games_played < 8" filter alone conflates: a true backup who has
+    never held a real starting role (e.g. Malik Willis: 2/7/6/4 games
+    2022-2025, never above 7) versus an ESTABLISHED starter who just had
+    one bad injury year (e.g. Kyler Murray: 11/8/17/5 - a real, full 17-
+    game starter season as recently as 2 years before the thin one).
+    Confirmed empirically why this split matters - see
+    apply_role_upgrade_durability_boost's docstring.
+    """
+    recent = season_stats[season_stats["season"].between(target_season - 3, target_season - 1)]
+    had_starter_season = (
+        recent[recent["games_played"] >= REAL_STARTER_SEASON_THRESHOLD][["player_id"]]
+        .drop_duplicates()
+        .assign(had_real_starter_season=True)
+    )
+    board = board.merge(had_starter_season, on="player_id", how="left")
+    board["had_real_starter_season"] = board["had_real_starter_season"].fillna(False).astype(bool)
+    return board
+
+
+def apply_role_upgrade_durability_boost(board: pd.DataFrame, max_games: int = 17) -> pd.DataFrame:
+    """REPLACE games_est for a CURRENT starter (depth_chart_rank == 1) with a
+    thin trailing games-played history (prev_games_played <
+    ROLE_UPGRADE_MIN_GAMES) with the empirical outcome for players in
+    exactly this situation historically - the durability counterpart to
+    apply_qb_role_upgrade_boost's rate fix, general across all four
+    positions, not QB-only. Requires `had_real_injury` (see
+    add_recent_injury_history_flag) already merged onto the board.
+
+    Found 2026-08-27 investigating user feedback that games_est is being
+    over-weighted for this kind of player: Malik Willis, MIA's current
+    nominal starter, has a games_played history of 2/7/6/4 across 2022-2025
+    - a thin backup-era usage pattern that isn't really an "injury" signal
+    at all, it just reflects that he wasn't the guy before. `wavg_games_
+    played` treats a backup's own history the same way it treats an
+    injury-prone starter's, which is a real category error: a backup's low
+    games_played mostly reflects ROLE (didn't get the chance to play), not
+    AVAILABILITY (couldn't play) - and once a player is actually the
+    CURRENT starter, their own pre-promotion history says very little about
+    how many games they'll get.
+
+    ADDITIVE-BOOST VERSION REPLACED WITH DIRECT REPLACEMENT (2026-08-27,
+    same day - the first version of this fix, an additive +N games boost
+    on top of the player's own wavg_games_played, wasn't good enough and
+    the user correctly kept pushing). The real problem with an additive
+    patch: it assumes every player in this cohort needs the SAME fixed
+    delta added to THEIR OWN starting point, but their own starting point
+    (wavg_games_played, built from backup-era usage) turns out to carry
+    essentially ZERO predictive signal for this cohort at all - tested
+    directly: correlation(prev_games_played, actual future games_played)
+    within the role-upgrade cohort is r=0.057, p=0.67, statistically
+    indistinguishable from zero. A player who played 1 game last season and
+    a player who played 7 end up with statistically the same real outcome
+    once they're both the CURRENT starter. That means anchoring the
+    estimate on the player's own history at all - even patched with a
+    boost - is the wrong shape of fix, not just a miscalibrated one:
+    confirmed directly by comparing prediction error on a held-out
+    validation set (2023-2025) - a FLAT REPLACEMENT using the calibration-
+    set (2018-2022) empirical mean games_played for this cohort has MAE
+    3.906, vs MAE 6.979 using each player's own wavg_games_played - the
+    flat replacement is nearly TWICE as accurate. This mirrors exactly why
+    rookies get a completely separate curve (fit_rookie_curve) instead of a
+    patched version of the veteran wavg_-based approach: when a player's
+    own trailing history isn't a real signal for the question being asked,
+    patching it is structurally wrong regardless of the patch size.
+
+    IMPORTANT, checked before generalizing this insight: this does NOT mean
+    games_est is broadly over-discounting durability for the whole player
+    population - the opposite framing was tested directly and rejected.
+    For CURRENT STARTERS as a whole (not just the narrow role-upgrade
+    cohort), the existing shipped model is already close to unbiased (mean
+    resid -0.24 games, MAE 2.94) and clearly beats a naive "assume every
+    starter plays a full season" baseline (mean resid -3.74, MAE 3.74 -
+    real starters really do miss real games on average, even before
+    considering any specific injury risk). Broadly shrinking or removing
+    the durability discount for all players would make the model WORSE,
+    not better - this fix is deliberately scoped to the one specific,
+    validated population (role-upgrade, thin-history-is-uninformative
+    starters) where the population-level logic breaks down, not applied
+    globally.
+
+    Split by injury history (added after Willis's case still looked wrong
+    even with the pooled additive boost): user asked specifically whether
+    the model was dinging Willis for injury risk he doesn't actually have -
+    checked his real injury report (`data/raw/injuries.parquet`) directly:
+    essentially clean, one minor late-2025 "Questionable - Shoulder" tag,
+    nothing serious ever. Built `had_real_injury` (a serious Out/Doubtful/
+    IR tag - not the routine Questionable tag) and computed the direct
+    empirical replacement mean separately for "healthy scratch" vs "had a
+    real injury" within the role-upgrade cohort (2018-2025, all seasons,
+    since a direct empirical mean - unlike a fitted regression coefficient
+    - doesn't need a separate calibrate/validate split to be trustworthy;
+    checked anyway and both cuts were stable across a 2018-2022/2023-2025
+    split, before the starter-season exclusion below was added). Real,
+    position-specific differences: RB and TE show a meaningful healthy-vs-
+    injury gap, QB and WR show little to none - kept the split anyway since
+    it's real where it matters and harmless where it's small. See
+    ROLE_UPGRADE_GAMES_EST_HEALTHY/INJURY_HISTORY for the final constants,
+    refit after the exclusion described next.
+
+    EXCLUDES players with a real recent starter season (`had_real_starter_
+    season`, see add_prior_starter_season_flag) - caught as a real
+    regression while verifying this fix on the board: Kyler Murray (prev_
+    games_played=5, from a 2025 injury) ALSO satisfies "thin last season,
+    current starter," but he is nothing like Willis - Murray had a full,
+    healthy 17-game starter season as recently as 2024 (games history 11/8/
+    17/5). Lumping him into the same "own history is uninformative"
+    treatment as a true never-started backup would have thrown away real,
+    relevant signal about him specifically - and it's exactly the case the
+    QB-specific bounce-back correction (estimate_games_played) already
+    exists to handle correctly. Verified directly: for players excluded
+    this way (a real starter season somewhere in the 3-year lookback,
+    thin most-recent one), their OWN wavg_games_played DOES correlate with
+    their real outcome (r=0.198, p=0.059 - much stronger than the true
+    role-upgrade cohort's r=0.057, p=0.67), and their mean actual games
+    (12.14) tracks reasonably close to their own wavg_games_played (9.08,
+    still somewhat underestimated - which is exactly what the existing
+    bounce-back correction is for). These players fall through to the
+    standard estimate_games_played path unchanged, not this function.
+    Constants refit on the correctly-narrowed cohort after adding this
+    exclusion (values differ slightly from the pre-exclusion version).
+
+    Concretely, for Malik Willis (clean injury history, QB, never had a
+    real starter season): games_est is now set directly to 11.00 (the real
+    empirical outcome for a healthy QB in his exact situation), not his own
+    wavg_games_played (~4.2) plus a patch - a materially different, better-
+    supported number, and one any player matching his same profile gets
+    automatically, not a name-driven special case. Kyler Murray correctly
+    falls through to the standard bounce-back-corrected path instead.
+
+    Uses the same live-updatable depth_chart_rank/injury-report signals as
+    every other role-transition function in this pipeline - an in-season
+    promotion, or a new injury, will correctly change which constant
+    applies the next time data is re-pulled.
+    """
+    board = board.copy()
+    upgraded = (
+        (board["depth_chart_rank"] == 1)
+        & (board["prev_games_played"] < ROLE_UPGRADE_MIN_GAMES)
+        & (~board["had_real_starter_season"])
+    ).fillna(False)
+    healthy_est = board["position"].map(ROLE_UPGRADE_GAMES_EST_HEALTHY)
+    injury_est = board["position"].map(ROLE_UPGRADE_GAMES_EST_INJURY_HISTORY)
+    replacement_est = healthy_est.where(~board["had_real_injury"], injury_est)
+
+    board.loc[upgraded, "games_est"] = replacement_est[upgraded].clip(upper=max_games)
+    board["total_points_pred"] = board["ppg_pred"] * board["games_est"]
+    return board
+
+
 def apply_team_opportunity_cap(board: pd.DataFrame, team_ceiling: pd.DataFrame | None = None) -> pd.DataFrame:
     """Rescale a team's players at a position so their combined
     `total_points_pred` never exceeds a real ceiling: `team_ceiling` (one
@@ -1969,6 +2159,72 @@ def compute_vbd(
 
     board["replacement_points"] = board["position"].map(replacement_points)
     board["vbd"] = board["total_points_pred"] - board["replacement_points"]
+    return board
+
+
+QB_STARTER_FLOOR_PPG = 11.90
+"""10th-percentile PPG among real historical QB seasons with 12+ games
+started (2010-2025, n=416) - see apply_qb_starter_floor's docstring.
+"""
+
+
+def apply_qb_starter_floor(board: pd.DataFrame) -> pd.DataFrame:
+    """Give any CURRENT QB1 (depth_chart_rank == 1) a minimum VBD, so a real,
+    rostered starting quarterback can never rank below players at other
+    positions who will genuinely never see the field - a mechanical flaw in
+    plain cross-position VBD comparison, not a rate/durability estimation
+    problem.
+
+    Found 2026-08-27, user pushback on Malik Willis's ranking (~600th
+    overall) even after both role-upgrade fixes above. Checked the actual
+    absolute numbers first, since a rate/durability tweak had already been
+    tried twice: Willis's total_points_pred (~107) is NOT unrealistic on
+    its own - real historical QB seasons with 12+ games started have a 10th-
+    percentile total of 168.8 points, and the worst ones on record (Jimmy
+    Clausen 2010, Derek Anderson 2010) still cleared 58-90. The problem is
+    entirely in the SUBTRACTION: QB's replacement level sits around ~254
+    points (naive QB13, already separately validated for the TOP of the
+    position against real VORP reference ranges - see compute_vbd's QB
+    note) - so any below-replacement-but-real starter gets an enormous
+    negative VBD (-147 for Willis), which lands him in the same overall-
+    rank neighborhood as a WR11 who will never play a snap and has ~5-10
+    total points - a 10x+ gap in ABSOLUTE production that VBD's linear,
+    same-bar-for-everyone subtraction can't see once both players are
+    "very below replacement."
+
+    This is specific to QB, not a general VBD flaw, for a real structural
+    reason: a real starting QB plays essentially 100% of offensive snaps
+    whenever active (unlike RB/WR/TE, where even a nominal "starter" is
+    often a committee/timeshare) - depth_chart_rank==1 at QB is a much
+    stronger, more literal guarantee of a real, full role than the same
+    rank at any other position. That's also why this fix does NOT
+    generalize automatically to RB/WR/TE: their own "starter floor," if
+    warranted, would need to be derived from and scaled by their OWN real
+    snap share (a true bell-cow WR/RB plays a very different share of
+    snaps than a committee "starter" at the same depth-chart rank) - not
+    attempted here, flagged as a distinct follow-up research question, not
+    assumed to carry over with the same logic or magnitude.
+
+    Floor is expressed as a PER-GAME rate (QB_STARTER_FLOOR_PPG, the 10th-
+    percentile PPG among real 12+ game QB seasons, 2010-2025) multiplied by
+    the player's OWN games_est, not a flat season-total floor - this
+    deliberately composes with whatever games_est the model has already
+    (validly) settled on, rather than assuming a player will necessarily
+    play a full season. A QB with a genuinely low games_est (real injury/
+    competition uncertainty) still gets a proportionally smaller floor, not
+    the full-season amount.
+
+    Does NOT touch total_points_pred/ppg_pred/games_est themselves - this
+    is a ranking/comparison-mechanism fix, not a claim that the underlying
+    point estimate was wrong. Applied after compute_vbd (needs
+    replacement_points, which compute_vbd attaches to the board).
+    """
+    board = board.copy()
+    is_current_starter = (board["position"] == "QB") & (board["depth_chart_rank"] == 1)
+    floor_vbd = QB_STARTER_FLOOR_PPG * board["games_est"] - board["replacement_points"]
+    board.loc[is_current_starter, "vbd"] = np.maximum(
+        board.loc[is_current_starter, "vbd"], floor_vbd[is_current_starter]
+    )
     return board
 
 
