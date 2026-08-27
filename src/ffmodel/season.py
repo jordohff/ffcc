@@ -1308,9 +1308,20 @@ RECENT_INJURY_THRESHOLD = 10
 BOUNCE_BACK_INTERCEPT = -0.58
 BOUNCE_BACK_SLOPE = 0.40
 
+QB_BOUNCE_BACK_INTERCEPT = -2.434
+QB_BOUNCE_BACK_SLOPE = 0.466
+"""QB-specific override of BOUNCE_BACK_INTERCEPT/SLOPE - see
+estimate_games_played's docstring for why QB needed its own fit. Same
+calibrate-on-2018-2022/validate-on-2023-2025 methodology as the original,
+run separately for QB only.
+"""
+
 
 def estimate_games_played(
-    weighted_games_played: pd.Series, prev_games_played: pd.Series, max_games: int = 17
+    weighted_games_played: pd.Series,
+    prev_games_played: pd.Series,
+    position: pd.Series | None = None,
+    max_games: int = 17,
 ) -> pd.Series:
     """Durability estimate: recency-weighted average games played over the
     last few seasons (see HISTORY_WEIGHTS/add_weighted_history_features),
@@ -1359,10 +1370,58 @@ def estimate_games_played(
     and inventing a fix just to move one specific player would repeat the
     mistake already made and reverted once this project (the age x elite
     interaction term, fit on too sparse a slice of data to trust).
+
+    QB-SPECIFIC CORRECTION (added 2026-08-27): the original BOUNCE_BACK_
+    INTERCEPT/SLOPE were fit on data pooled across all four positions,
+    dominated by RB/WR/TE (mean underestimate ~1.7-2.0 games for that
+    cohort). Investigating why Jayden Daniels/Joe Burrow/Lamar Jackson
+    ranked far below where real markets (FantasyCalc's trade-value data)
+    place them found QB's OWN true bias is much smaller - recent-injury QBs
+    are underestimated by only +0.38 games on average (vs +1.7-2.0 for the
+    other three positions pooled, p=8e-10 that QB is genuinely different) -
+    and isn't even uniform across severity: near-wipeout QB seasons (0-4
+    games played) show a real +1.2 game underestimate, but MODERATE ones
+    (5-9 games, e.g. Daniels' 2025) show no bias at all before any
+    correction (-0.74, i.e. already fine or slightly generous). Applying
+    the pooled correction to QB was measurably WRONG: on the 2023-2025
+    holdout, the plain (uncorrected) estimate was already close to
+    unbiased (mean resid 0.657, p=0.155 - not significant), but the
+    shipped POOLED correction made it significantly biased the other way
+    (mean resid -0.930, p=0.040). A QB-specific refit
+    (QB_BOUNCE_BACK_INTERCEPT/SLOPE, same calibrate-2018-2022/validate-
+    2023-2025 split) restores an unbiased estimate (mean resid 0.140,
+    p=0.756) - it requires far more severe games-missed (breakeven ~5.2
+    games missed vs the pooled formula's ~1.5) before any credit is added,
+    matching the real shape found above.
+
+    Also tested and REJECTED as an explanation for the Burrow/Daniels gap:
+    an "oscillating health" pattern (last season AND the season 2 years
+    back both shortened, with a healthy season between them - Burrow's
+    actual 2023-short/2024-full/2025-short history). This IS a real,
+    significant bias for RB/WR/TE (mean resid 1.64-2.06 games, p<3e-6 each)
+    - a genuinely new pattern, distinct from both the single-recent-injury
+    case (already corrected) and the single-old-injury-with-clean-recovery
+    case (already tested and rejected, see above) - but for QB specifically
+    it's small and NOT significant (mean resid 0.384, p=0.12, statistically
+    indistinguishable from the general recent-injury QB bias already
+    captured by the fix above). Not shipped as a QB correction; the
+    remaining Burrow/Daniels/Lamar Jackson gap vs. real market value is not
+    explained by a durability-estimate bug and is more likely inherent
+    Ridge-model shrinkage for an unusual (elite-but-injury-interrupted)
+    profile with few close training comps - a known, accepted limitation
+    of this project's deliberately simple/interpretable model choice, not
+    a bug with an identified fix.
     """
     games_est = weighted_games_played.clip(upper=max_games)
     games_missed = (RECENT_INJURY_THRESHOLD - prev_games_played).clip(lower=0)
-    correction = (BOUNCE_BACK_INTERCEPT + BOUNCE_BACK_SLOPE * games_missed).clip(lower=0)
+    if position is not None and (position == "QB").any():
+        intercept = pd.Series(BOUNCE_BACK_INTERCEPT, index=games_missed.index)
+        slope = pd.Series(BOUNCE_BACK_SLOPE, index=games_missed.index)
+        intercept = intercept.where(position != "QB", QB_BOUNCE_BACK_INTERCEPT)
+        slope = slope.where(position != "QB", QB_BOUNCE_BACK_SLOPE)
+        correction = (intercept + slope * games_missed).clip(lower=0)
+    else:
+        correction = (BOUNCE_BACK_INTERCEPT + BOUNCE_BACK_SLOPE * games_missed).clip(lower=0)
     correction = correction.where(prev_games_played < RECENT_INJURY_THRESHOLD, 0)
     return (games_est + correction).clip(upper=max_games)
 

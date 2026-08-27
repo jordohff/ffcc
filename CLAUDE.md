@@ -1727,3 +1727,70 @@ data doesn't support chasing, matching this project's now-established discipline
 diagnostic prompt, not a target to fit (per the user's own explicit framing this session). Closed - no code
 changes from this investigation.
 
+
+
+### 2026-08-27 Ã¢â‚¬â€ QB-specific durability fix shipped; QB's weak market alignment traced to 2 outliers, not a broad issue
+
+User asked to look at QB specifically: is QB ranked correctly as its own position, and is it blended into the
+overall board correctly relative to RB/WR/TE - explicitly framing real markets as a diagnostic for understanding
+gaps, not a target to fit (confirming the standing rule from the TE/RB/WR work this session).
+
+**Real, validated bug found and fixed: the shared BOUNCE_BACK_INTERCEPT/SLOPE correction was miscalibrated for
+QB.** Noticed Jayden Daniels (our rank ~200-225) and Joe Burrow (our rank ~214-223) sitting far below where
+FantasyCalc's real trade-value market places them (Daniels rank 52, Burrow rank 45 - both clearly regarded as
+elite). Root-caused: the existing bounce-back correction (added in an earlier session, see the durability
+bounce-back entry) was fit on data POOLED across all four positions, dominated by RB/WR/TE's much larger bias
+(~1.7-2.0 games underestimated for a recent-injury cohort). QB's OWN true bias is much smaller (+0.38 games,
+p=0.07 - barely significant on its own) and NOT uniform by severity: near-wipeout QB seasons (0-4 games played)
+show a real +1.2 game underestimate, but MODERATE ones (5-9 games - exactly Daniels' 2025, 7 games) show NO
+bias before correction (-0.74, i.e. the plain estimate was already fine). Applying the pooled formula to QB
+was measurably wrong: on a 2023-2025 holdout, the PLAIN (uncorrected) estimate was already close to unbiased
+(p=0.155), but the shipped POOLED correction introduced a real, significant bias (mean resid -0.930, p=0.040).
+
+Fit a QB-specific correction (QB_BOUNCE_BACK_INTERCEPT=-2.434, QB_BOUNCE_BACK_SLOPE=0.466, same calibrate-on-
+2018-2022/validate-on-2023-2025 split as the original) - requires far more severe games-missed (breakeven ~5.2
+games vs the pooled formula's ~1.5) before any bounce-back credit is added. Validated: holdout mean resid
+0.140 (p=0.756), fully unbiased. `estimate_games_played` now takes a `position` argument and applies the
+QB-specific constants only for QB rows, keeping the original (already-validated-for-RB/WR/TE) pooled constants
+everywhere else. Shipped. Real backtest improvement: QB Spearman 0.722 -> 0.732 (half-PPR backtest).
+
+**Important, honest result: this fix does NOT rescue Daniels or Burrow specifically** - their games_est
+actually moved slightly WORSE (Daniels 11.37->10.75, Burrow ~11.3->11.1), since the old pooled correction was
+over-crediting them, not under-crediting. The real market gap for these two remains open.
+
+**Tested and REJECTED a second hypothesis for the same gap**: an "oscillating health" pattern (last season AND
+the season 2 years back both shortened, with a full healthy season between them - Burrow's actual 2023-short/
+2024-full/2025-short history, a genuinely new pattern distinct from both the already-corrected single-recent-
+injury case and the already-tested-and-rejected single-old-injury-with-clean-recovery case). This pattern IS a
+real, significant bias for RB/WR/TE (mean resid 1.64-2.06 games, p<3e-6 each - a real, generalizable finding
+worth remembering for future durability work at those positions) but for QB specifically it's small and NOT
+significant (mean resid 0.384, p=0.12) - statistically indistinguishable from the general QB bias already
+fixed above. Not shipped as a QB correction.
+
+**Diagnosed the Burrow/Daniels gap as inherent Ridge-model shrinkage, not a fixable durability bug**: dumped
+both players' full QB feature vectors - their wavg_ppg (Daniels: 19.06, an elite recency-weighted rate) doesn't
+translate proportionally into ppg_pred (15.26) because Ridge spreads credit thinly across many correlated
+features (wavg_ppg's own coefficient is only +0.32) and both players have unusual profiles (young/dynamic
+rushing QBs with an injury-interrupted, still-partially-established track record) with few close training
+comps. This matches the already-accepted McCaffrey precedent (a known, honest limitation of this project's
+deliberately simple/interpretable linear model, not something to force-fix with an unsupported interaction
+term).
+
+**QB's overall weak alignment with real market value (Spearman 0.589 vs FantasyCalc, the worst of the four
+positions - RB 0.815, WR 0.791, TE 0.632) is concentrated in just 2 players, not a broad problem**: excluding
+Burrow and Daniels alone, QB Spearman jumps to 0.739 (n=30) - comparable to WR's 0.791 and RB's 0.815. This is
+an important, clarifying answer to "how should QB blend into the overall board" - the QB model isn't
+systematically miscalibrated, a couple of specific injury-interrupted-elite profiles are just hard cases for a
+linear model with limited comps, the same way Freiermuth/Tremble are hard cases for TE and for the same root
+reason (unusual profile, not enough similar training examples).
+
+**Not yet investigated, flagged for a future look**: Kyler Murray (real market rank 129 vs our ~612), Kirk
+Cousins (183 vs ~630), Malik Willis (146 vs ~648) - other large QB gaps spotted in the same cross-check,
+time-boxed out of this session. Worth checking whether these are real modeling issues or (like several RB/WR/TE
+cases already found) the known team=NaN data gap or a real-but-accepted backup-QB streaming discount.
+
+No change made to QB's cross-position VBD/replacement level (naive QB12 formula) - already validated in an
+earlier session against real reference VORP ranges and confirmed still reasonable here (Josh Allen VBD ~85-89,
+in the previously-cited 40-80+ range for a QB1-in-a-tier-of-his-own outcome); nothing in this round's research
+changed that conclusion.
+
