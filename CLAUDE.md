@@ -1400,3 +1400,289 @@ already avoided once this project (see the reverted `QB_STREAMING_DEPTH_MULTIPLI
 research record; the coaching-continuity extension to O-line (originally scoped as a follow-up) was not pursued
 since it would have been built on top of a null-result foundation.
 
+
+
+### 2026-08-27 â€” root-caused the two open FantasyPros comparison patterns: one real bug (fixed), one open question
+
+Followed up on the two patterns flagged at the end of the previous session (backup-TE overrating, aging-veteran
+underrating) with real root-cause investigation rather than guessing at fixes.
+
+**Veteran-underrating pattern: NOT a modeling opinion - a real, confirmed NaN-propagation bug, now fixed.**
+`apply_team_opportunity_cap`'s `board.groupby(["team", "position"])["total_points_pred"].transform("sum")`
+silently returned NaN for every player with an unresolved `team` (pandas groupby drops NaN-key rows by
+default, and `.transform()` gives those rows NaN back, not a real total). That NaN then multiplied straight
+through `ppg_pred`/`total_points_pred`, wiping out an already-computed, perfectly good prediction. Confirmed
+with a minimal pandas repro. 66 players (27 WR, 22 RB, 12 TE, 5 QB) were affected - every single name on the
+"we underrate this veteran" list from the FantasyPros comparison (Tyreek Hill, Nick Chubb, Austin Ekeler,
+Keenan Allen, Najee Harris, Kareem Hunt, DeAndre Hopkins, etc.) turned out to be exactly this list, not a real
+disagreement with consensus. These are real, active players - Sleeper's own feed shows them "Active" (Tyreek
+Hill even carries a live "Questionable" tag, which only exists for a rostered player) but with no team
+resolved by either nflverse or Sleeper as of this pull - a known, previously-documented gap (see the
+apply_current_team_from_sleeper docstring), but its downstream severity (total prediction deletion, not just
+a missing SOS lookup) hadn't been diagnosed until now. Fix: `scale = (ceiling / team_totals).clip(upper=1.0).fillna(1.0)`
+in `apply_team_opportunity_cap` - no team to check a ceiling against means no cap applies, not an undefined
+ratio. Verified: all 66 players' `ppg_pred`/`total_points_pred` restored to real values; `team` is still
+correctly NaN (informational - real data gap, not silently papered over). Regenerated both boards.
+
+Still open, NOT fixed this session (a genuinely separate, harder problem): WHY these 66 real players have no
+resolvable team in either source in the first place. Sleeper's live feed showing `team: null` while marking
+them `"Active"` suggests their own data is stale/incomplete for these specific players, not that the players
+are actually inactive - no alternative structured source was investigated this session. Worth a future look
+if any of these 66 names are actually relevant to a real draft.
+
+**Backup-TE-overrating pattern: tested the obvious hypothesis (depth-chart rank), rigorously, and REJECTED it -
+a genuine null result, matching this project's established pattern of not shipping fixes the data doesn't
+support.** Anecdotally, the flagged TEs (Kmet, Tremble, Knox, Oliver, Trautman, Fant, Hooper, Gray) are almost
+all CURRENTLY the #2 TE on their own team's depth chart (`depth_chart_rank` on the board, informational-only -
+not a trained feature, since the earlier finding was that historical depth-chart data uses an incompatible
+schema and couldn't be trained on). That earlier finding was partially re-examined: `nfl.load_depth_charts()`
+DOES have a clean, consistent, usable schema back to 2010 (`depth_team`/`depth_position`/`gsis_id`, 99.5%
+gsis_id match rate) - the "incompatible schema" issue documented before was specifically about the CURRENT-
+season live pull's different column names (`dt`/`pos_slot`/`pos_rank`), not about the historical loader being
+unusable in general. So a `prev_season_depth_rank` feature IS buildable. Built it and walk-forward tested
+whether last season's depth_team rank (1=starter) predicts next season's ppg residual (2018-2025, pooled,
+retrained per test season) - the honest result: NOT significant. All positions pooled: r=-0.017, p=0.325.
+Per position: TE showed the right DIRECTION (starters +0.056 mean resid vs backups -0.213, i.e. we do slightly
+over-predict backups) but not significant (p=0.163, n=402 backups) and inconsistent across exact rank values
+(rank-2 TEs -0.371, rank-3 TEs +0.016 - noisy, not a clean gradient). WR showed no signal at all (p=0.858). RB
+trended the opposite direction. **Not shipped** - matches the standing discipline against fitting a plausible-
+sounding feature to an underpowered/noisy slice (see the reverted age x elite interaction, the rejected rookie
+comp_max-on-ppg adjustment).
+
+**More likely real explanation, NOT yet tested - flagged as the concrete next step**: our TE replacement level
+(TE15, ~109 total points/~6.4 ppg) treats a played bench TE as a real, rosterable asset - but FantasyPros'
+actual redraft ECR dumps essentially every non-elite TE (their TE13 onward) down into the 300s-400s overall,
+consistent with the well-known real-world "wait on TE" / stream-the-position redraft strategy, where the
+consensus view isn't "TE13 will score fewer points than our model thinks" so much as "don't bother rostering
+a non-elite TE at all, the streaming pool is good enough." This is the same shape of question already resolved
+for QB (see the 2026-08-09 QB VBD entry: naive replacement rank already matched real VORP reference ranges) -
+worth the same treatment: check real public VBD/VORP methodology for TE specifically (does it also anchor to a
+much shallower TE replacement rank than the naive `teams * te_slots`?) before touching MAN_GAMES_DEPTH_MULTIPLIER
+or FLEX_ALLOCATION for TE. Not investigated yet this session - the FantasyPros re-fetch needed to confirm the
+TE12-20 ECR shape hit repeated transient connection resets and wasn't completed in time. Next session should
+start here: pull FP's TE-only ECR list, compare its shape (not just overlap) against our TE VBD curve, and
+research whether real VORP methodology treats TE replacement level differently before deciding whether/how to
+adjust.
+
+
+
+### 2026-08-27 â€” TE replacement-level research finished: a real, TE-specific structural gap, not a bug
+
+Finished the TE replacement-level investigation queued at the end of the previous entry (the FantasyPros
+re-fetch kept hitting transient connection resets via nflreadpy's downloader - worked around by pulling the
+same underlying CSV directly with `curl`: `https://github.com/dynastyprocess/data/raw/master/files/db_fpecr_latest.csv`).
+
+**Confirmed with a single concrete example.** Pat Freiermuth is literally the player OUR board uses to define
+TE replacement level (TE15, VBD=0, our overall rank 93 - a reasonable low-end starter). FantasyPros' real
+consensus ECR has him at TE28, **overall rank 241** - outside the top-240 fantasy-relevant players entirely.
+Same player, same real-world production expectation, wildly different treatment.
+
+**Checked whether this is a general "our replacement rank is systematically wrong" issue or TE-specific**, by
+finding each position's own replacement-level player (closest-to-zero VBD) and comparing OUR overall rank for
+that player against FP's real overall rank for the same player:
+
+| position | our replacement player | our overall rank | FP overall rank | gap |
+|---|---|---|---|---|
+| QB | Sam Darnold | 94 | 139 | 45 (FP even more pessimistic - fine, same direction) |
+| RB | Kyle Monangai | 96 | 111 | 15 (close - RB replacement level lines up well) |
+| WR | Garrett Wilson | 95 | 30 | -65 (opposite direction - see below, a DIFFERENT bug) |
+| TE | Pat Freiermuth | 93 | 241 | 148 (huge, TE-specific) |
+
+RB and QB replacement levels are basically fine. TE is the outlier by a wide margin - confirms this is a
+real, TE-specific phenomenon, not a general VBD-formula problem.
+
+**Mechanism, grounded in real sourcing** (FantasyPros' own VBD writeup and VORP methodology page,
+`fantasypros.com/2026/06/fantasy-football-draft-strategy-value-based-drafting-2026`,
+`fantasypros.com/nfl/rankings/ppr-vorp-te.php`): FantasyPros' own points-based VORP model uses a TE
+replacement rank of ~TE16 - almost identical to ours (~TE14-15) - and gives McBride a VORP of 101, roughly in
+line with our own 93.49 for McBride. So the underlying POINTS projections and the formula-replacement RANK
+both roughly agree with ours. The huge gap is specifically between FantasyPros' points-based VORP tool and
+FantasyPros' actual aggregated expert-consensus DRAFT ORDER (ECR, redraft-overall) - real drafters devalue
+non-elite TEs far more steeply than a points-above-replacement formula would, because (their own writeup
+confirms this explicitly) only one roster slot is required, and the position is genuinely streamable
+week-to-week off waivers in a way RB/WR aren't - a mediocre bench RB/WR still holds some flex/injury-fill
+value, a mediocre bench TE realistically doesn't. This is a structural roster-construction effect a pure
+"points above naive replacement" formula cannot capture no matter how the replacement RANK constant is tuned -
+tuning the rank shallower would help the mid-tier gap somewhat but can't reproduce a real market behavior
+(avoid the position outside the top ~10) that isn't really about points at all.
+
+**Separately found, NOT the same issue**: the WR case (Garrett Wilson, our rank 95 vs FP's 30) is the OPPOSITE
+direction and is a genuine, different problem worth a look later - Wilson's `ppg_pred` (12.2) is a perfectly
+reasonable WR2 rate, but `games_est` (12.62/17) drags his total down enough to land him near our WR
+replacement line, while FP's real market clearly isn't discounting him this hard for one injury-shortened
+2025. This is NOT explained by the already-shipped bounce-back correction failing to fire (it did fire) - more
+likely the correction just isn't fully closing the gap for his specific games-missed magnitude, or there's a
+separate signal (his 2025 down year was Aaron Rodgers/poor-QB-situation-related, not purely durability) not
+being captured. Flagged for a future session, not investigated further here - out of scope for this round's
+"TE vs. veteran" question.
+
+**Recommendation, not yet implemented - a genuine methodology choice, not a bug fix**: this project's own
+precedent from the QB VBD research is directly relevant and points the other way this time. There, the naive
+formula already matched real reference VORP ranges, so nothing was changed - deliberately not chasing ADP for
+its own sake. Here, the naive formula does NOT match real market behavior for TE, and the gap is large,
+structural, and now well-evidenced (not a guess). Two honest options: (1) shallow TE's effective replacement
+rank in `compute_vbd` (e.g. toward TE9-10, roughly where FP's real cliff visibly begins - Kittle/Kelce sit at
+FP overall rank ~94-101, still clearly rosterable, vs. the plunge that starts around TE16+) to better reflect
+that real leagues functionally treat TE as a much shallower position than the man-games-availability math
+alone implies; or (2) leave it as-is and document the divergence as a known, understood, principled limitation
+of a points-based VBD model for a streamable position, the same way the QB entry documents its own reasoning.
+Both are defensible - this needs the user's call before touching MAN_GAMES_DEPTH_MULTIPLIER/FLEX_ALLOCATION or
+adding a new TE-specific constant, not a unilateral change.
+
+
+
+### 2026-08-27 â€” TE VBD fix shipped, incoming-competition hypothesis tested and rejected
+
+User chose to empirically derive the right TE replacement depth (rather than eyeball TE9-10 or leave it
+undecided) and separately asked to test a new idea: does a team ADDING pass-catching competition (e.g.
+Pittsburgh signing Michael Pittman and drafting WR Germie Bernard, on top of DK Metcalf) predict a worse
+outlook for an existing player who now has to share the pie - Pat Freiermuth specifically cited as the
+motivating case. Verified the underlying roster facts first (real in our data: PIT's 2026 WR room does show
+Metcalf/Pittman/Bernard as described).
+
+**Incoming-competition hypothesis: tested at two levels of granularity, rejected at both - a real, honest
+null result.** Built `compute_incoming_competition` as the mirror image of the already-shipped, already-
+validated `compute_vacated_opportunity`: for each team/season, sum the PRIOR season's targets/carries/routes
+of every player who's NEW to that team this season (real trade/FA arrivals with a genuine prior-season stat
+line - true rookies aren't covered by this version, no prior NFL data to sum). Walk-forward tested (2018-2025,
+retrained per test season, same methodology as every other bias-check this project has run) whether this
+predicts a residual (actual ppg - model's own prediction) for existing/incumbent players on that team:
+- All positions pooled by combined incoming-targets: WR showed a borderline-only signal (r=-0.050, p=0.063);
+  QB/RB/TE showed nothing (p > 0.35 all).
+- Split by the ARRIVING player's own position (does incoming WR volume specifically predict a TE's shortfall,
+  matching the exact PIT/Freiermuth hypothesis) - the signal doesn't just weaken, it disappears entirely: TE
+  vs incoming_wr_targets_pg r=-0.024 (p=0.50); WR vs any incoming position also not significant once split
+  (p=0.10-0.99 across incoming_qb/rb/te/wr); RB shows nothing either. Restricting to only "real role" TE
+  incumbents (wavg_target_share above median, to rule out noise from irrelevant depth players) didn't help
+  either (p=0.29-0.98).
+Conclusion: a real, plausible-sounding idea, grounded in a real and correctly-identified example, that simply
+doesn't hold up as a general, fittable signal in 8 seasons of walk-forward NFL data - consistent with this
+project's repeated finding that team-composition-based crowding effects (see also the rookie comp_max
+research and the O-line research) are usually too small/noisy relative to a player's own usage history to add
+real predictive value on top of what's already captured. Not shipped. Freiermuth's specific case is better
+explained by the TE replacement-level gap below, not by a missing "Pittsburgh got crowded" feature.
+
+**TE replacement-level fix: shipped.** Derived a concrete number rather than eyeballing one. Re-pulled
+FantasyPros' TE-only ECR (the nflreadpy downloader kept hitting transient connection resets on this
+particular file this session - worked around by pulling the same underlying CSV directly via `curl
+https://github.com/dynastyprocess/data/raw/master/files/db_fpecr_latest.csv`, same file nflreadpy's
+`load_ff_rankings()` wraps). Computed the slope of FP's overall rank vs. TE position-rank across the top 30 at
+each position: TE ~7.79 overall-ranks per position-rank, QB ~6.37, RB ~2.84, WR ~2.12 - TE (and QB, to a
+lesser extent) decline much faster than RB/WR throughout their whole range. This ISN'T a sharp "cliff" (no
+clean inflection point in the TE curve - it's a fairly steady, steep slope start to finish), so a
+cliff-detection approach doesn't cleanly yield one number.
+
+Instead calibrated against RB's own replacement level, since the earlier cross-position check (see the
+previous entry's table: RB our-rank 96 vs FP-rank 111, QB 94 vs 139, TE 93 vs 241) already confirmed RB tracks
+FantasyPros' real market well and TE badly - used RB's real-market bar (FP overall rank 111) as the anchor and
+found the closest TE position-rank match: TE11 (FP overall rank 113, Dalton Kincaid). Added
+`TE_MARKET_REPLACEMENT_RANK = 10` (0-indexed - "the 11th-best TE") in season.py, which OVERRIDES the man-games/
+flex formula for TE only (RB/WR/QB keep it, since the same evidence shows it already works for them) in
+`compute_vbd`. Checked the direction carefully before shipping, learning from the reverted QB streaming
+attempt earlier this project: a SHALLOWER rank (11 vs the man-games formula's ~14) means a HIGHER-scoring
+replacement baseline gets subtracted, which correctly LOWERS every TE's VBD (elite tier included, moderately)
+rather than raising it - opposite mechanism from the QB case, verified this one goes the right direction
+before shipping.
+
+Verified effect on the board: Freiermuth's own overall rank moved 93 -> 107 (still not FP's 241 - this was
+never meant to fully replicate FP's number, just correct the calibration using a principled, evidenced anchor
+rather than the un-adjusted man-games formula). Whole TE tier compressed appropriately: McBride (elite TE1)
+17 -> further down but still a clear top-20 overall pick (VBD 66.61, was 71.57) - consistent with the real
+"elite TE premium, replaceable after that" theory this whole investigation was chasing. Full board re-check:
+top-250 FantasyPros overlap 203 -> 205/250; Spearman (matched players) 0.782 -> 0.798 - both metrics computed
+AFTER the earlier NaN-cap-bug fix in this same session, which is why they don't compare directly to the
+very first pre-fix baseline (204/250, 0.815) from two entries back - that number included the 66 wrongly-NaN'd
+veterans hidden at the bottom, which inflated it artificially. Net effect of ALL of this session's fixes
+together (NaN cap bug + TE replacement level) is a real, evidenced, modest improvement, reported honestly
+rather than cherry-picking the most flattering before/after pair.
+
+Regenerated both boards (half-PPR and PPR) with all of this session's changes.
+
+
+
+### 2026-08-27 Ã¢â‚¬â€ role-security discount shipped, after catching and correcting my own methodology mistake
+
+User pushed back hard that the TE board still looked wrong ("I don't consider Freiermuth to be a TE10 level
+player... it also does not match multiple rankings I've seen") and asked for web research plus a thesis before
+touching code again, since the eventual fix needed to be schema-correct for in-season live updates, not a
+one-off patch.
+
+**Multi-source research**: pulled FantasyPros ECR, FantasyPros ADP, FantasyFootballCalculator (7,986 real mock
+drafts, live Aug 20-27 2026, scraped via `curl` after nflreadpy's downloader kept hitting transient connection
+resets on this file), and FantasyCalc's real trade-value market API
+(`api.fantasycalc.com/values/current` - required `curl --ssl-no-revoke`, a schannel-specific TLS quirk on this
+machine, not a real block). All four independently confirmed a real, large group of bench TE/RB/WR (Freiermuth,
+Kmet, Tremble, Knox, Oliver, Trautman, Hooper, and more) are worth close to nothing in real drafts/trades -
+FantasyCalc doesn't even list most of them (below their valued-player floor entirely), while our board still
+gave them meaningful positive total_points_pred and mid-board overall ranks.
+
+**First implementation attempt was methodologically wrong, caught and corrected before the user could rely on
+it** - a genuinely important lesson, on the same level as the earlier reverted QB streaming multiplier and age
+x elite interaction:
+- Calibrated depth_chart_rank thresholds AND a 0.375 discount multiplier by confusion-matrix-matching
+  FantasyCalc's real-market RANKING (100% precision at TE>=2/RB>=3/WR>=4). This LOOKED rigorous (real external
+  data, precision/recall math) but was still fundamentally chasing MARKET OPINION, not validated against real,
+  realized fantasy outcomes.
+- User specifically pushed on this: "I don't need it against depth chart rank... we want to use that data to
+  make nominal adjustments... when we know tprr/yprr can be important... the leader for tight ends in routes
+  run for the year is typically in the top three at end of year." Tested this real, correctly-motivated claim:
+  the TE season routes-run leader finished top-3 in PPG 6/10 years, top-5 7/10 (2016-2025) - a real pattern,
+  not folklore. Then tested whether `routes_run_pg * yprr` (volume x efficiency) tracks FantasyCalc's real TE/WR
+  ranking better than our own model's ranking - it does, dramatically (TE Spearman 0.75 vs our own 0.64, WR
+  0.85 vs 0.69) - RB is the exception (0.54 vs our own 0.81, since RB value is rushing-dominated, not routes-
+  dominated - correctly excluded).
+- **Critical check that invalidated the whole first design**: added `routes_run_pg * yprr` as an explicit Ridge
+  interaction feature and walk-forward tested it (2018-2025) against ACTUAL next-season ppg, not against
+  FantasyCalc's opinion. Result: no real improvement (WR Spearman 0.7594->0.7596, TE 0.7334->0.7331 -
+  rounding-error noise). Matching the market's opinion better does NOT mean predicting real outcomes better -
+  a genuinely important, generalizable finding for this whole line of research. Not shipped.
+- Applied the same real-outcomes standard back to the ORIGINAL depth-chart-rank design and found it also didn't
+  fully hold up: the proposed TE-only secondary gate (nominal TE1 starters with low wavg_targets_pg, meant to
+  catch Tremble/Freiermuth specifically) came back NULL against real outcomes (low-volume TE1 starters actually
+  score 1.14x their own model's prediction on average - UNDER-predicted, not over - vs 1.08x for higher-volume
+  TE1s, p=0.87, no real difference). The market's near-zero valuation of Tremble/Freiermuth specifically is NOT
+  supported by how they actually perform - the market looks like it's overreacting here, not our model being
+  wrong. Not shipped.
+
+**What DID hold up under the real-outcomes standard, and is what shipped**: re-tested depth_chart_rank the
+RIGHT way - not lagged (the earlier, already-null test from this same session used LAST season's depth chart
+to predict a bias, p=0.16-0.86, which mostly just re-derives information the trailing-performance features
+already have) but CONTEMPORANEOUS (the CURRENT/target season's own early depth chart, via
+`nfl.load_depth_charts()`'s week-1/2 snapshot each season 2010-2025 - a real historical analog of "the
+preseason depth chart for the season being predicted," the same treatment already given to contracts/coaching
+elsewhere in this pipeline). This is a genuinely different, better-founded test: does a player's CURRENT role
+(known at prediction time, not yet reflected in trailing stats) predict a real bias walk-forward? Yes, hugely
+significant at every position (RB p=5e-6, WR p=2e-6, TE p=1e-7). Backup discount ratios (mean actual ppg / mean
+model-predicted ppg for gated players, real historical data, n=123-412 per position): RB (depth_chart_rank>=3)
+0.783, WR (>=3) 0.779, TE (>=2) 0.844. RB/WR rank>=2 alone wasn't a strong enough signal (RB ratio 0.937,
+barely biased - committee-share RB2s/WR2s often keep real value); WR rank>=4 has too few real week-1/2
+observations in 15 years of data to validate at all, so this pipeline doesn't try to gate that deep.
+
+**Shipped**: `apply_role_security_discount` (season.py) - discounts `ppg_pred`/`total_points_pred` for players
+at or above their position's `ROLE_SECURITY_DEPTH_THRESHOLD` (RB>=3, WR>=3, TE>=2; QB untouched - the earlier
+FantasyPros comparison found zero QB mismatches in the top 200, nothing to fix) by
+`ROLE_SECURITY_DISCOUNT` (RB 0.78, WR 0.78, TE 0.84) - both derived from real, walk-forward-validated
+historical bias, not from matching any external market's opinion. Uses CURRENT `depth_chart_rank`, already a
+live, re-pullable snapshot (`load_current_depth_chart`) - this is the "correct for live in-season updates"
+property the user specifically asked for: re-run `pull_data.py` mid-season and a promoted/demoted player's
+discount automatically updates with the real depth chart, no re-scraping of external markets needed. Wired
+into `build_draft_rankings.py` right after the depth-chart merge, before `apply_team_opportunity_cap` (so a
+discounted backup's lower points don't unnecessarily trigger the team-level cap).
+
+**Verified mechanically on the regenerated board**: Kyren Williams/Jerry Jeudy/Freiermuth/Tremble (all
+depth_chart_rank==1, real starters or the honest known Freiermuth/Tremble gap) correctly untouched; Cole Kmet/
+Dawson Knox/Josh Oliver (TE, depth_chart_rank==2) correctly discounted exactly 0.84x
+(118.70->99.70, 86.66->72.79, 59.82->50.25). FantasyPros top-250 overlap 205->202/250, Spearman (matched)
+0.798->0.806 - roughly a wash on the aggregate metric, which is expected and correct: this fix targets
+INDIVIDUAL players' role security using REAL-outcome-validated math, not FantasyPros' specific opinion, so
+it was never going to move that one comparison metric cleanly in one direction - the previous (rejected)
+market-opinion-chasing version would likely have scored better on THIS metric while being less honest about
+what it actually validated against.
+
+**Known, still-open gap, correctly NOT patched over**: Freiermuth and Tommy Tremble (both nominal TE1s with
+genuinely low team-wide passing volume) remain on the board close to where they were before this fix - the
+real, data-supported finding is that this is the MARKET overvaluing the "worthlessness" narrative around them,
+not a real projection error on our side, given how they've actually performed. If the user's own read differs
+from this project's own walk-forward evidence, that's worth an explicit, separate conversation (not a rule to
+quietly override) - flagging rather than resolving unilaterally.
+

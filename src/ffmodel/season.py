@@ -1527,6 +1527,108 @@ def compute_team_position_ceiling(
     return pd.DataFrame(rows).melt(id_vars="team", var_name="position", value_name="ceiling")
 
 
+ROLE_SECURITY_DEPTH_THRESHOLD = {"RB": 3, "WR": 3, "TE": 2}
+"""Current depth_chart_rank at or above which a player gets the role-
+security discount (ROLE_SECURITY_DISCOUNT). QB has no entry - not needed,
+see apply_role_security_discount's docstring.
+"""
+
+ROLE_SECURITY_DISCOUNT = {"RB": 0.78, "WR": 0.78, "TE": 0.84}
+
+
+def apply_role_security_discount(board: pd.DataFrame) -> pd.DataFrame:
+    """Discount ppg_pred/total_points_pred for players with no real role
+    security, using CURRENT depth_chart_rank - already a live-updatable
+    signal in this pipeline (sourced from load_current_depth_chart's live
+    snapshot, re-pullable anytime), not a static external scrape, so this
+    stays correct as real depth charts change during the season.
+
+    Root problem (found 2026-08-27, via user pushback that the TE board
+    still looked wrong after the TE_MARKET_REPLACEMENT_RANK fix): cross-
+    checked our board against real-market sources (FantasyPros ECR/ADP,
+    FantasyFootballCalculator's real mock drafts, FantasyCalc's real trade-
+    value market) - all showed bench-tier TE/RB/WR getting real positive
+    total_points_pred and mid-board ranks here despite the market treating
+    many of them as nearly worthless. TE_MARKET_REPLACEMENT_RANK only
+    shifts the WHOLE position's baseline - it can't target individual
+    under-secure players, which is what this function does.
+
+    IMPORTANT METHODOLOGY CORRECTION, kept here as a record of a real
+    mistake caught before shipping: the first version of this function used
+    thresholds/discount calibrated by matching FantasyCalc's real-market
+    RANKING (confusion-matrix precision against their ~193-player valued
+    universe) - which produced a much more aggressive discount (0.375) and
+    an extra TE-only secondary gate for low-volume nominal starters (e.g.
+    Tommy Tremble, Pat Freiermuth). That was chasing MARKET OPINION, not
+    validated against REAL, REALIZED outcomes - and when actually tested
+    against real outcomes it did not hold up:
+    1. A `routes_run_pg * yprr` interaction feature correlates well with
+       FantasyCalc's real ranking (Spearman 0.75-0.85 for TE/WR, notably
+       better than our own model's own ranking) but added as an explicit
+       Ridge feature and walk-forward tested (2018-2025) against ACTUAL
+       next-season ppg, it changes accuracy by a rounding error (WR
+       Spearman 0.7594->0.7596, TE 0.7334->0.7331) - matching the market's
+       opinion better does NOT mean predicting real outcomes better. Not
+       shipped.
+    2. The TE low-volume-starter secondary gate came back NULL against real
+       outcomes: TE1 starters with wavg_targets_pg < 3.0 (the Tremble/
+       Freiermuth case) actually score ppg 1.14x their own model's
+       prediction on average (i.e. UNDER-predicted, not over-predicted),
+       statistically indistinguishable from higher-volume TE1 starters
+       (1.08x, p=0.87). The real market's near-zero valuation of these
+       specific players is not supported by how they actually perform.
+       Not shipped - Freiermuth/Tremble remain a known, honest gap between
+       our board and market sentiment, and the evidence says the MARKET is
+       the one overreacting here, not our model.
+
+    What DID hold up, tested the right way: CONTEMPORANEOUS (current/same-
+    season, not lagged) depth_chart_rank against REAL walk-forward ppg
+    residuals (2018-2025, using nfl.load_depth_charts' week-1/2 snapshot
+    each season as the historical analog of "the preseason depth chart for
+    the season being predicted"). This is a different, and better-founded,
+    test than the EARLIER null result from this same session (depth-chart-
+    rank vs. ppg residual, p=0.16-0.86) - that test used LAST season's
+    depth chart to predict a bias in the NEXT season, which mostly
+    duplicates information the trailing performance features already
+    capture. THIS test uses the CURRENT season's own depth chart (known at
+    prediction time, same treatment as contracts/coaching elsewhere in this
+    pipeline) - a genuine role signal the trailing-stats-only model has no
+    other way to see (a player promoted or buried on the CURRENT depth
+    chart hasn't necessarily had that show up in last year's rate stats
+    yet). Result: real, large, highly significant overprediction bias
+    for backups at every position (RB p=5e-6, WR p=2e-6, TE p=1e-7).
+
+    Thresholds and discount ratios both come directly from this real-
+    outcomes test (mean actual ppg / mean model-predicted ppg for gated
+    players, gate>=threshold, n=123-412 per position):
+    - RB: depth_chart_rank>=3 (rank 2 alone wasn't a strong enough signal -
+      ratio 0.937, barely biased; committee-share RB2s often keep real
+      value) -> ratio 0.783
+    - WR: depth_chart_rank>=3 -> ratio 0.779 (rank>=4 has too few real
+      week-1/2 observations to validate at all - the position's bench
+      stays too deep/inconsistently charted that far down to measure
+      reliably, so this pipeline doesn't try to go deeper than rank 3)
+    - TE: depth_chart_rank>=2 -> ratio 0.844
+    - QB: no threshold - not tested here, and this whole investigation's
+      earlier board-vs-FantasyPros check already found zero QB mismatches
+      in the top 200, so there's no known problem to fix.
+
+    Applied BEFORE apply_team_opportunity_cap in the pipeline - discounting
+    a gated backup's points first means they contribute less to their
+    team's summed total, so the team cap (a separate, team-level check)
+    isn't needlessly triggered by a player who's already been individually
+    corrected.
+    """
+    board = board.copy()
+    depth_threshold = board["position"].map(ROLE_SECURITY_DEPTH_THRESHOLD)
+    discount = board["position"].map(ROLE_SECURITY_DISCOUNT)
+    gated = (board["depth_chart_rank"] >= depth_threshold).fillna(False)
+
+    board.loc[gated, "ppg_pred"] = board.loc[gated, "ppg_pred"] * discount[gated]
+    board["total_points_pred"] = board["ppg_pred"] * board["games_est"]
+    return board
+
+
 def apply_team_opportunity_cap(board: pd.DataFrame, team_ceiling: pd.DataFrame | None = None) -> pd.DataFrame:
     """Rescale a team's players at a position so their combined
     `total_points_pred` never exceeds a real ceiling: `team_ceiling` (one
@@ -1558,6 +1660,22 @@ def apply_team_opportunity_cap(board: pd.DataFrame, team_ceiling: pd.DataFrame |
     games anyone plays - so `ppg_pred` absorbs the whole adjustment and
     `total_points_pred` is recomputed from the scaled `ppg_pred` * the
     original `games_est`.
+
+    Real bug found and fixed here (2026-08-27): `groupby(["team",
+    "position"])` drops rows with a NaN `team` by default (pandas' own
+    groupby behavior), so `.transform("sum")` returned NaN - not a real
+    total - for every player with no resolved team (real players neither
+    nflverse nor Sleeper currently roster to a team, e.g. Tyreek Hill, Nick
+    Chubb, Austin Ekeler as of this pull - a known, already-documented gap,
+    see apply_current_team_from_sleeper). That NaN then multiplied straight
+    through `ppg_pred`/`total_points_pred`, silently deleting a valid
+    prediction that had already been computed - 66 players (27 WR, 22 RB,
+    12 TE, 5 QB) were wiped to NaN and sorted dead last on the board. This
+    was the actual root cause of an apparent "the model wildly underrates
+    established veterans" pattern found via the FantasyPros comparison -
+    not a modeling opinion at all, just this mechanical NaN propagation.
+    Fixed by treating "no team to check a ceiling against" as "no cap
+    applies" (scale 1.0) rather than an undefined ratio.
     """
     board = board.copy()
     ceiling = board["position"].map(TEAM_POSITION_CEILING)
@@ -1566,13 +1684,23 @@ def apply_team_opportunity_cap(board: pd.DataFrame, team_ceiling: pd.DataFrame |
         specific.index = board.index
         ceiling = specific.fillna(ceiling)
     team_totals = board.groupby(["team", "position"])["total_points_pred"].transform("sum")
-    scale = (ceiling / team_totals).clip(upper=1.0)
+    scale = (ceiling / team_totals).clip(upper=1.0).fillna(1.0)
     board["ppg_pred"] = board["ppg_pred"] * scale
     board["total_points_pred"] = board["ppg_pred"] * board["games_est"]
     return board
 
 
 MAN_GAMES_DEPTH_MULTIPLIER = {"QB": 1.06, "RB": 1.11, "TE": 1.10, "WR": 1.08}
+
+TE_MARKET_REPLACEMENT_RANK = 10
+"""0-indexed replacement rank for TE only (position 10 = the 11th-best TE by
+total_points_pred, i.e. "TE11") - overrides the man-games/flex formula for
+TE specifically. See compute_vbd's docstring for the full derivation; the
+short version is that TE11 is where FantasyPros' real overall ECR rank
+(113) lines up with RB's own already-validated replacement-level bar (111),
+which is a much shallower/shorter bench than the man-games formula alone
+implies (~TE14, 0-indexed 13).
+"""
 
 FLEX_ALLOCATION = {"RB": 0.16, "WR": 0.79, "TE": 0.05}
 """How much of each flex slot's replacement-depth credit goes to RB/WR/TE.
@@ -1651,6 +1779,49 @@ def compute_vbd(
     correctly compounds with (not fights) the QB note above: QB's own
     multiplier is the smallest of the four, so QB's already-validated
     replacement level barely moves.
+
+    TE market-depth override (TE_MARKET_REPLACEMENT_RANK): unlike QB, this
+    one IS a real, evidenced gap, found via the 2026-08-27 FantasyPros
+    top-250 comparison. The man-games formula above already lines up with
+    FantasyPros' own points-based VORP methodology for TE (~TE16 - see
+    fantasypros.com/nfl/rankings/ppr-vorp-te.php) - so "how many TEs get
+    rostered" isn't the problem. The problem is that FantasyPros' actual
+    aggregated expert DRAFT ORDER (redraft-overall ECR, a different FP
+    product measuring real market behavior, not their own points formula)
+    craters non-elite TE value far more steeply: Pat Freiermuth, this
+    project's own TE15/replacement-level player (VBD=0, our overall rank
+    93 - a plausible low-end starter), sits at FantasyPros' TE28, overall
+    rank 241 - outside the top 240 fantasy-relevant players entirely. Their
+    own writeup gives the mechanism: TE needs only one roster slot and is
+    genuinely streamable off waivers week to week in a way RB/WR aren't (a
+    mediocre bench RB/WR still holds flex/injury-fill value; a mediocre
+    bench TE largely doesn't) - a real roster-construction effect a static
+    points-above-replacement formula can't reproduce by itself, no matter
+    how MAN_GAMES_DEPTH_MULTIPLIER/FLEX_ALLOCATION are tuned.
+
+    Checked this wasn't a general "our replacement ranks are all wrong"
+    problem first: found each position's own replacement-level player and
+    compared OUR overall rank for them against FantasyPros' real overall
+    rank for that same player. RB (rank 96 vs 111) and QB (94 vs 139) line
+    up reasonably; only TE is wildly off (93 vs 241) - confirms this is
+    TE-specific, not a formula-wide issue.
+
+    TE_MARKET_REPLACEMENT_RANK is set to 11, not derived from a sharp
+    "cliff" (there isn't one - FantasyPros' TE overall-rank-per-position-
+    rank slope is a fairly steady ~7.8 ranks/position throughout, roughly
+    3-4x steeper than RB's ~2.8 and WR's ~2.1, and even steeper than QB's
+    ~6.4 - TE just declines faster throughout its whole range, not
+    flat-then-cliff). Instead calibrated against RB's own replacement level
+    as an anchor, since RB (unlike the TE formula) was already confirmed to
+    track FantasyPros' real market well: RB's replacement-level player sits
+    at FantasyPros overall rank 111; TE11 (FantasyPros overall rank 113,
+    Dalton Kincaid at the time of this check) is the closest TE position-
+    rank match to that same real-market bar. This directly overrides the
+    man-games-formula rank for TE only (RB/WR/QB keep the man-games/flex
+    formula, which the same evidence shows already works for them) - unlike
+    the QB attempt (see above), this shallows the rank, which correctly
+    LOWERS every TE's VBD (a shallower rank means a higher-scoring
+    replacement baseline, matching the intended direction this time).
     """
     board = board.copy()
     board["position_rank"] = board.groupby("position")["total_points_pred"].rank(
@@ -1661,7 +1832,7 @@ def compute_vbd(
         "QB": teams * qb_slots * MAN_GAMES_DEPTH_MULTIPLIER["QB"],
         "RB": teams * (rb_slots + flex_slots * FLEX_ALLOCATION["RB"]) * MAN_GAMES_DEPTH_MULTIPLIER["RB"],
         "WR": teams * (wr_slots + flex_slots * FLEX_ALLOCATION["WR"]) * MAN_GAMES_DEPTH_MULTIPLIER["WR"],
-        "TE": teams * (te_slots + flex_slots * FLEX_ALLOCATION["TE"]) * MAN_GAMES_DEPTH_MULTIPLIER["TE"],
+        "TE": TE_MARKET_REPLACEMENT_RANK,
     }
 
     replacement_points = {}

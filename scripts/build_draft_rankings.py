@@ -27,6 +27,7 @@ from ffmodel.season import (
     add_rookie_outcome_range,
     add_strength_of_schedule_features,
     apply_current_team_from_sleeper,
+    apply_role_security_discount,
     build_enriched_weekly,
     build_head_coach_history,
     build_prediction_features,
@@ -235,6 +236,9 @@ def main() -> None:
         .rename(columns={"gsis_id": "player_id", "pos_rank": "depth_chart_rank"})
     )
     board = board.merge(depth, on="player_id", how="left")
+
+    print("Applying role-security discount for players with no current-depth-chart security...")
+    board = apply_role_security_discount(board)
 
     oc_path = COACHING_DIR / f"offensive_coordinators_{args.draft_season}.csv"
     if oc_path.exists():
