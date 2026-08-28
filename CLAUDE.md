@@ -2198,3 +2198,56 @@ a null `player_id` before joining old vs. new boards, hitting the same NaN-merge
 project has documented multiple times (the UDFA-rookies-with-no-gsis_id issue). Fixed in the skill's own
 instructions so future runs don't re-report this known, deliberately-deferred issue as new noise.
 
+
+
+### 2026-08-28 - RB/WR/TE starter-floor extension: tested, genuine null result, closed
+
+Followed up on the open thread flagged in `apply_qb_starter_floor`'s docstring: does the QB starter-floor
+concept (a real starter can't rank below players who'll never see the field, because cross-position VBD
+subtraction is blind to a 10x+ gap in absolute production once both are "below replacement") generalize to
+RB/WR/TE if grounded in THEIR OWN real snap share, rather than assumed to carry the same magnitude/logic?
+
+**Step 1 - does the mechanical problem QB had even reproduce here?** Checked the current board for every
+RB/WR/TE at `depth_chart_rank==1` with negative VBD (37 players - mostly TE, plus a handful of RB/WR: J.K.
+Dobbins, Cam Skattebo, Omarion Hampton, Bhayshul Tuten, Rashee Rice, Malik Nabers, Mike Evans, etc.). None of
+them land anywhere near the truly-worthless tier the way pre-fix Malik Willis did (QB, overall rank ~600+,
+next to players with ~0-5 total points). Worst case here (J.K. Dobbins) sits at overall rank 162 with 93.6
+total points; the genuinely worthless bottom of the RB/WR/TE pool doesn't start until rank ~600+ with
+total_points_pred near or below zero. Mechanically this makes sense and isn't a coincidence: QB's replacement
+level sits at ~252 points (only 32 real per-game starters exist league-wide, and MAN_GAMES_DEPTH_MULTIPLIER's
+own QB multiplier is the smallest of the four positions), while RB/WR/TE replacement level sits at 144-151
+points (deliberately deepened by MAN_GAMES_DEPTH_MULTIPLIER/FLEX_ALLOCATION, or by TE_MARKET_REPLACEMENT_RANK
+for TE) - a much smaller bar to fall below, so the same VBD subtraction can't produce QB's extreme distortion
+here even for a real player projected well below replacement.
+
+**Step 2 - is the underlying RATE estimate itself too conservative for real high-snap-share players?** Tested
+directly rather than assuming the answer from step 1 alone. Built an empirical PPG floor the same way
+QB_STARTER_FLOOR_PPG was derived (a real, same-season, snap-share-defined "how bad can this role realistically
+be" distribution, not a lagged predictive feature) - REG-season snap_share (2013-2025) merged to season PPG,
+bucketed into 0.05-wide deciles per position. Correlation between same-season snap share and PPG is very
+strong (RB r=0.907 n=1266, WR r=0.838 n=1983, TE r=0.763 n=1009) - confirms snap share is a real, reliable
+role indicator worth building a floor from, same logic as the QB version.
+
+Compared every flagged player's OWN `ppg_pred` against the empirical p10 floor for their bucket of
+`prev_snap_share_level` (last season's average snap share - the closest available proxy to "current projected
+role," since a not-yet-played season has no contemporaneous snap share the way QB's depth_chart_rank does).
+Result: in all but 4 of 37 cases, `ppg_pred` already MEETS OR EXCEEDS the empirical floor for that player's
+own recent role (e.g. Dobbins: floor 8.82 vs ppg_pred 10.29; Nabers: floor 6.02 vs ppg_pred 13.18; Freiermuth:
+floor 2.57 vs ppg_pred 9.10). The 4 exceptions (Tre Tucker +3.47, Aaron Jones +0.95, Cade Otton +0.27, Mason
+Taylor +0.23 ppg below their own floor) are small, inconsistent, and not a systematic pattern - not worth a
+new mechanism for.
+
+**Conclusion: the QB starter-floor fix does NOT generalize to RB/WR/TE, and testing confirms it shouldn't -
+this is a real, evidenced null result, not an oversight.** The large negative VBDs driving this list are the
+CORRECT, INTENDED output of already-shipped, already-evidenced mechanisms working as designed: TE's shallow
+market-calibrated replacement rank (TE_MARKET_REPLACEMENT_RANK, deliberately punishing non-elite TE the way
+the real market does) accounts for most of the list; RB/WR's own deeper, man-games-adjusted replacement level
+accounts for the rest. Unlike QB, `depth_chart_rank==1` at RB/WR/TE is a genuinely weak, noisy proxy for "real
+full-time role" (the flagged players' own `prev_snap_share_level` ranges from 0.22 to 0.96 - nowhere near
+QB's near-universal ~100%-snaps-when-active guarantee), so gating a floor on it alone would risk floor-boosting
+real committee/timeshare backups just because they're nominally atop a thin depth chart - the opposite of what
+the already-shipped `apply_role_security_discount` is deliberately designed to catch. No code shipped; this
+closes the open thread from `apply_qb_starter_floor`'s docstring. Matches this project's established pattern
+of testing a plausible-sounding generalization on real data before shipping it (see also the RB/WR overrating
+investigation and the O-line/incoming-competition null results).
+

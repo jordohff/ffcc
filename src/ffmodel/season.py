@@ -2275,13 +2275,27 @@ def apply_qb_starter_floor(board: pd.DataFrame) -> pd.DataFrame:
     whenever active (unlike RB/WR/TE, where even a nominal "starter" is
     often a committee/timeshare) - depth_chart_rank==1 at QB is a much
     stronger, more literal guarantee of a real, full role than the same
-    rank at any other position. That's also why this fix does NOT
-    generalize automatically to RB/WR/TE: their own "starter floor," if
-    warranted, would need to be derived from and scaled by their OWN real
-    snap share (a true bell-cow WR/RB plays a very different share of
-    snaps than a committee "starter" at the same depth-chart rank) - not
-    attempted here, flagged as a distinct follow-up research question, not
-    assumed to carry over with the same logic or magnitude.
+    rank at any other position.
+
+    TESTED for RB/WR/TE (2026-08-28) and found NOT to generalize - a real,
+    evidenced null result, not an unexamined gap. Two checks: (1) do real
+    RB/WR/TE starters actually get crushed near the truly-worthless tier
+    the way pre-fix QB Willis was? No - RB/WR/TE replacement level (144-151
+    points) is far lower than QB's (~252), so even a real starter well
+    below replacement lands nowhere near the ~600+ overall-rank tier where
+    production goes to ~0; the worst case checked (J.K. Dobbins) still sat
+    at overall rank 162. (2) is the underlying ppg_pred itself too low for
+    real high-snap-share players? Built an empirical p10-PPG-by-snap-share-
+    decile floor the same way QB_STARTER_FLOOR_PPG was derived and checked
+    every RB/WR/TE starter with negative VBD against it (via
+    prev_snap_share_level) - ppg_pred already met or exceeded the floor in
+    33 of 37 cases; the 4 exceptions were small (<3.5 ppg) and inconsistent.
+    Also: depth_chart_rank==1 is a much weaker/noisier role signal at
+    RB/WR/TE than at QB (the flagged players' own prev_snap_share_level
+    ranged 0.22-0.96) - gating a floor on it alone would risk boosting real
+    committee backups, the opposite of what apply_role_security_discount is
+    for. See CLAUDE.md 2026-08-28 for full methodology. No RB/WR/TE
+    equivalent shipped.
 
     Floor is expressed as a PER-GAME rate (QB_STARTER_FLOOR_PPG, the 10th-
     percentile PPG among real 12+ game QB seasons, 2010-2025) multiplied by
