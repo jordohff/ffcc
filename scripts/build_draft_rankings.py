@@ -29,7 +29,6 @@ from ffmodel.season import (
     add_prior_starter_season_flag,
     add_recent_injury_history_flag,
     apply_current_team_from_sleeper,
-    apply_elite_recent_injury_durability_boost,
     apply_qb_backup_games_est,
     apply_qb_role_upgrade_boost,
     apply_qb_starter_floor,
@@ -53,10 +52,11 @@ from ffmodel.season import (
     compute_vbd,
     compute_rookie_walk_forward_residuals,
     compute_walk_forward_residuals,
-    estimate_games_played,
     evaluate_rankings,
+    fit_durability_models_by_position,
     fit_rookie_curve,
     fit_vet_models_by_position,
+    predict_durability,
     predict_vet_ppg,
     project_rookies,
     project_team_pace,
@@ -107,7 +107,8 @@ def backtest(training_table: pd.DataFrame, test_season: int, top_n: int) -> None
 
     models = fit_vet_models_by_position(train)
     test["ppg_pred"] = predict_vet_ppg(models, test)
-    test["games_est"] = estimate_games_played(test["wavg_games_played"], test["prev_games_played"], test["position"])
+    durability_models = fit_durability_models_by_position(train)
+    test["games_est"] = predict_durability(durability_models, test)
     test["total_points_pred"] = test["ppg_pred"] * test["games_est"]
     test["total_points"] = test["ppg"] * test["games_played"]
 
@@ -156,15 +157,13 @@ def main() -> None:
     print()
     print(f"Fitting final veteran model on all seasons through {args.draft_season - 1}...")
     models = fit_vet_models_by_position(training_table)
+    durability_models = fit_durability_models_by_position(training_table)
     vet_board = build_prediction_features(
         season_stats, args.draft_season, rosters, schedules, snap_share, contract_history, sos, healthy_season_stats
     )
     vet_board["ppg_pred"] = predict_vet_ppg(models, vet_board)
-    vet_board["games_est"] = estimate_games_played(
-        vet_board["wavg_games_played"], vet_board["prev_games_played"], vet_board["position"]
-    )
+    vet_board["games_est"] = predict_durability(durability_models, vet_board)
     vet_board["total_points_pred"] = vet_board["ppg_pred"] * vet_board["games_est"]
-    vet_board = apply_elite_recent_injury_durability_boost(vet_board)
     vet_board = vet_board[
         ["player_id", "player_display_name", "position", "team", "age", "team_changed",
          "new_head_coach", "new_hc_prior_team_ppg", "prev_snap_share_trend", "prev_snap_share_level",

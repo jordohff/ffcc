@@ -11,6 +11,7 @@ this week."
 
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
@@ -1208,6 +1209,155 @@ def predict_vet_ppg(models: dict[str, Pipeline], rows: pd.DataFrame) -> pd.Serie
     return preds
 
 
+DURABILITY_FEATURES = [
+    "prev_games_played", "wavg_games_played", "prev_made_playoffs", "wavg_ppg",
+    "years_past_decline_age", "team_changed", "cap_percent",
+]
+"""Feature set for the GBM durability model (see fit_durability_models_by_
+position) - deliberately includes wavg_ppg (a talent/role proxy), unlike
+the old linear formula which only ever looked at trailing games history.
+That's what lets a tree-based model discover the elite x recent-injury
+interaction (2026-08-28) automatically, instead of it needing to be found
+by hand and hand-patched as a separate correction.
+"""
+
+
+DURABILITY_MONOTONIC_CST = [1, 1, 0, 0, 0, 0, 0]
+"""Monotonic constraints for make_durability_pipeline, aligned to
+DURABILITY_FEATURES: prev_games_played and wavg_games_played are forced
+non-decreasing (more trailing health can never predict FEWER expected
+games at the same level of the other features) - added 2026-08-28 after
+catching a real anomaly in the unconstrained model (Jahmyr Gibbs, a
+perfectly healthy elite RB, initially predicted BELOW several less-healthy
+comps - a sparse-region overfit artifact, the same class of instability
+this project has repeatedly guarded against with linear models). Verified
+this wasn't just a band-aid: walk-forward MAE with the constraint is equal
+to or slightly BETTER than unconstrained (2012-2025: ALL 3.251->3.239),
+so it's a strict improvement, not an accuracy/safety tradeoff. The other
+five features (prev_made_playoffs, wavg_ppg, years_past_decline_age,
+team_changed, cap_percent) are left unconstrained since their true
+relationship to durability isn't monotonic in isolation - it's the
+elite x recent-injury INTERACTION (wavg_ppg combined with a low
+prev_games_played) that GBM needs the freedom to learn, not a flat rule.
+"""
+
+
+def make_durability_pipeline() -> Pipeline:
+    """GBM pipeline for durability (real games_played) prediction."""
+    return Pipeline([("impute", SimpleImputer(strategy="median")),
+                      ("gbm", HistGradientBoostingRegressor(max_depth=3, random_state=42,
+                                                             monotonic_cst=DURABILITY_MONOTONIC_CST))])
+
+
+def fit_durability_models_by_position(train: pd.DataFrame) -> dict[str, Pipeline]:
+    """Fit one GBM model per position predicting real games_played from
+    DURABILITY_FEATURES - REPLACES the old estimate_games_played (a
+    recency-weighted average of trailing games_played, clip(upper=17),
+    plus a pile of hand-found/hand-patched corrections: RECENT_INJURY_
+    THRESHOLD-gated bounce-back, a QB-specific bounce-back refit, and an
+    elite-player-recent-injury boost).
+
+    Found and shipped 2026-08-28, following a long investigation chain:
+    user pushback on Patrick Mahomes (near-replacement despite elite real
+    talent) and Dak Prescott (below replacement despite a full healthy
+    2025, dragged down by a fully-resolved 2024 hamstring injury still
+    sitting at 30% recency weight) - both traced to real, individually-
+    validated corrections that nonetheless left real players looking
+    wrong. Rather than keep hand-discovering and hand-patching one
+    interaction at a time (the elite x recent-injury boost shipped
+    earlier the same day was already the fourth distinct correction layered
+    onto the base formula), tested whether a fundamentally different
+    approach captures these patterns automatically.
+
+    First tested whether the LINEAR WEIGHTING SCHEME itself (the 0.5/0.3/
+    0.2 three-year recency weights, shared with the rate-stat blend but
+    never separately validated for durability) was the problem - it
+    wasn't. Directly tested the user's "punished too much for one bad
+    year" hypothesis via the natural robust-statistic fix (median of the
+    last 3 seasons, which would fully ignore a single outlier injury year
+    - exactly what would rescue Dak's specific case, median(17,8,17)=17)
+    - walk-forward evaluated across 2010-2025 (n=3513-5912 depending on
+    window): median performs WORSE than the current weighted mean in
+    EVERY position (e.g. overall MAE 3.71 vs 3.64), as do equal weights,
+    fewer years of history, or "max of last 2." The current weighting is
+    already close to optimal among simple reweighting/robust-statistic
+    alternatives - real injuries carry genuine recurrence signal on
+    average across the population, even though any INDIVIDUAL case (like
+    Dak's) might turn out fine; a statistic that fully ignores a bad year
+    throws away real predictive information. Only a 4-year window with a
+    modest 4th-year weight (0.4/0.3/0.2/0.1) beat the current 3-year
+    scheme, and only marginally (~0.5-1%).
+
+    The GBM alternative, by contrast, is a real, substantial, robustly
+    validated improvement - not from reweighting the same information
+    differently, but from using MORE information (talent level via
+    wavg_ppg, age, job security via cap_percent) and letting a tree find
+    real interactions (like elite x recent-injury) automatically instead
+    of requiring each one to be hand-discovered. Backtested through every
+    season with enough trailing history to predict at all (2012-2025, 14
+    seasons, minimum 391 players in any single test season - all data,
+    not a cherry-picked recent window): QB MAE 3.164->3.117 (+1.5%), RB
+    3.859->3.443 (+10.8%), WR 3.598->3.197 (+11.1%), TE 3.362->3.200
+    (+4.8%), ALL 3.555->3.251 (+8.6%) - a real, consistent, position-
+    general improvement, most pronounced at RB/WR where durability
+    matters most and QB's own gain is real but modest (QB has the
+    smallest per-season sample of the four positions).
+
+    User's explicit decision on scope: GBM REPLACES the base formula
+    (including the bounce-back correction and the elite-recent-injury
+    boost - GBM should rediscover both automatically via its feature set)
+    but does NOT replace the role-transition corrections
+    (apply_role_upgrade_durability_boost, apply_qb_backup_games_est,
+    apply_qb_starter_floor) - those are about a player's CURRENT depth-
+    chart role, a live signal a model trained only on trailing historical
+    stats has no way to see, and remain layered on top of this base
+    model's output exactly as they were layered on top of the old linear
+    formula.
+
+    Real, VALIDATED anomaly caught before shipping (see
+    DURABILITY_MONOTONIC_CST): the unconstrained model initially predicted
+    Jahmyr Gibbs (a perfectly healthy elite RB, prev_games_played=17,
+    wavg_games_played=16.6) BELOW several less-healthy comps - a real
+    instability, not a typo. Checked whether this was overfit noise or a
+    real pattern before "fixing" it either way: real historical RBs with
+    prev_games_played==17 average only 13.57 games the FOLLOWING season
+    (n=75), and the elite-and-perfectly-healthy subset matching Gibbs'
+    profile averages 14.07-14.42 (n=19-30) - so the LOW number itself is
+    real and validated, not an artifact; RB workload risk is largely
+    independent of recent health, a real pattern the old linear formula
+    (which had nothing to correct for a fully healthy player) never
+    captured at all. The instability that WAS a real problem - GBM
+    initially ranking a perfectly healthy player BELOW some less-healthy
+    ones, not just lower than intuition suggested - was fixed with
+    DURABILITY_MONOTONIC_CST, which came back equal-or-better on walk-
+    forward accuracy, a genuine improvement rather than an accuracy
+    tradeoff.
+    """
+    models = {}
+    for position in POSITION_VET_FEATURES:
+        pos_train = train[train["position"] == position].dropna(subset=DURABILITY_FEATURES + ["games_played"])
+        if pos_train.empty:
+            continue
+        pipeline = make_durability_pipeline()
+        pipeline.fit(pos_train[DURABILITY_FEATURES], pos_train["games_played"].clip(upper=17))
+        models[position] = pipeline
+    return models
+
+
+def predict_durability(models: dict[str, Pipeline], rows: pd.DataFrame, max_games: int = 17) -> pd.Series:
+    """Predict real games_played for each row using its position's GBM
+    durability model (see fit_durability_models_by_position), clipped to a
+    real season length.
+    """
+    preds = pd.Series(index=rows.index, dtype=float)
+    for position in POSITION_VET_FEATURES:
+        mask = rows["position"] == position
+        if not mask.any() or position not in models:
+            continue
+        preds.loc[mask] = np.clip(models[position].predict(rows.loc[mask, DURABILITY_FEATURES]), 0, max_games)
+    return preds
+
+
 def build_rookie_training_table(season_stats: pd.DataFrame, draft_picks: pd.DataFrame) -> pd.DataFrame:
     """Find each drafted player's actual rookie season (their first season
     with a recorded stat line matching their draft class year) and attach
@@ -1376,207 +1526,6 @@ def add_rookie_outcome_range(rookies: pd.DataFrame, outcome_range: pd.DataFrame)
     return rookies.drop(columns="round_bucket")
 
 
-RECENT_INJURY_THRESHOLD = 10
-BOUNCE_BACK_INTERCEPT = -0.58
-BOUNCE_BACK_SLOPE = 0.40
-
-QB_BOUNCE_BACK_INTERCEPT = -2.434
-QB_BOUNCE_BACK_SLOPE = 0.466
-"""QB-specific override of BOUNCE_BACK_INTERCEPT/SLOPE - see
-estimate_games_played's docstring for why QB needed its own fit. Same
-calibrate-on-2018-2022/validate-on-2023-2025 methodology as the original,
-run separately for QB only.
-"""
-
-
-def estimate_games_played(
-    weighted_games_played: pd.Series,
-    prev_games_played: pd.Series,
-    position: pd.Series | None = None,
-    max_games: int = 17,
-) -> pd.Series:
-    """Durability estimate: recency-weighted average games played over the
-    last few seasons (see HISTORY_WEIGHTS/add_weighted_history_features),
-    capped at a full season, plus a bounce-back correction for a player
-    coming off a recently shortened season.
-
-    Uses multi-year history rather than just last season, so a player with a
-    genuine injury-proneness PATTERN (e.g. 17/10/12 games the last 3 years)
-    gets a lower estimate than someone who had one fluky bad-luck season
-    (e.g. 17/17/10) - the same recency-weighted blend used for the rate
-    stats, applied here to games played specifically. Still a simple,
-    transparent heuristic rather than a trained model - it's easy to see
-    (and second-guess) exactly what it's assuming for a given player, which
-    matters more for a durability estimate than squeezing out a bit more
-    accuracy from a black-box model on a genuinely hard problem (in-season
-    injuries are close to unpredictable in advance).
-
-    Bounce-back correction: prompted by Christian McCaffrey dropping out of
-    the 2026 top-12 overall, then testing (not assuming) whether recent
-    injury history should count AGAINST a player, per the user's explicit
-    "draft for upside and situation, not scared of injuries" framing.
-    Walk-forward tested (predict every season 2018-2025 using only data
-    from before it) whether a plain recency-weighted games average is
-    biased for players coming off a shortened season (prev_games_played <
-    RECENT_INJURY_THRESHOLD). It is - badly - and in the OPPOSITE direction
-    caution would suggest: calibrated the correction on 2018-2022 seasons,
-    validated out-of-sample on 2023-2025, and the plain average
-    underestimated this cohort's actual next-season games by +1.28 on
-    average (well-centered at -0.13 after correcting). This held whether
-    the recent injury was severe (0-4 games played: +2.60 underestimate) or
-    moderate (5-9 games: +0.51), and whether it was a one-off (+1-year
-    history clean: -0.13, i.e. already fine) or part of a chronic pattern
-    (two bad seasons in a row: +1.32, underestimated even MORE) - there was
-    no cut of this data where discounting further was justified. Final
-    correction constants (BOUNCE_BACK_INTERCEPT/SLOPE) are refit on the
-    full 2018-2025 pooled data after that validation.
-
-    Deliberately does NOT extend to an OLDER injury that's now 2 seasons
-    back with a full healthy season in between (McCaffrey's actual 2026
-    setup: 2025 healthy, 2024's Achilles 2 seasons back still pulling his
-    3-year wavg_games_played down) - that pattern was tested with the same
-    calibrate/validate split and showed no statistically significant bias
-    (validation mean -0.36, p=0.57), so no correction is applied there.
-    McCaffrey's 2026 games_est is still discounted by 2024 sitting at 30%
-    recency weight - the data doesn't currently support overriding that,
-    and inventing a fix just to move one specific player would repeat the
-    mistake already made and reverted once this project (the age x elite
-    interaction term, fit on too sparse a slice of data to trust).
-
-    QB-SPECIFIC CORRECTION (added 2026-08-27): the original BOUNCE_BACK_
-    INTERCEPT/SLOPE were fit on data pooled across all four positions,
-    dominated by RB/WR/TE (mean underestimate ~1.7-2.0 games for that
-    cohort). Investigating why Jayden Daniels/Joe Burrow/Lamar Jackson
-    ranked far below where real markets (FantasyCalc's trade-value data)
-    place them found QB's OWN true bias is much smaller - recent-injury QBs
-    are underestimated by only +0.38 games on average (vs +1.7-2.0 for the
-    other three positions pooled, p=8e-10 that QB is genuinely different) -
-    and isn't even uniform across severity: near-wipeout QB seasons (0-4
-    games played) show a real +1.2 game underestimate, but MODERATE ones
-    (5-9 games, e.g. Daniels' 2025) show no bias at all before any
-    correction (-0.74, i.e. already fine or slightly generous). Applying
-    the pooled correction to QB was measurably WRONG: on the 2023-2025
-    holdout, the plain (uncorrected) estimate was already close to
-    unbiased (mean resid 0.657, p=0.155 - not significant), but the
-    shipped POOLED correction made it significantly biased the other way
-    (mean resid -0.930, p=0.040). A QB-specific refit
-    (QB_BOUNCE_BACK_INTERCEPT/SLOPE, same calibrate-2018-2022/validate-
-    2023-2025 split) restores an unbiased estimate (mean resid 0.140,
-    p=0.756) - it requires far more severe games-missed (breakeven ~5.2
-    games missed vs the pooled formula's ~1.5) before any credit is added,
-    matching the real shape found above.
-
-    Also tested and REJECTED as an explanation for the Burrow/Daniels gap:
-    an "oscillating health" pattern (last season AND the season 2 years
-    back both shortened, with a healthy season between them - Burrow's
-    actual 2023-short/2024-full/2025-short history). This IS a real,
-    significant bias for RB/WR/TE (mean resid 1.64-2.06 games, p<3e-6 each)
-    - a genuinely new pattern, distinct from both the single-recent-injury
-    case (already corrected) and the single-old-injury-with-clean-recovery
-    case (already tested and rejected, see above) - but for QB specifically
-    it's small and NOT significant (mean resid 0.384, p=0.12, statistically
-    indistinguishable from the general recent-injury QB bias already
-    captured by the fix above). Not shipped as a QB correction; the
-    remaining Burrow/Daniels/Lamar Jackson gap vs. real market value is not
-    explained by a durability-estimate bug and is more likely inherent
-    Ridge-model shrinkage for an unusual (elite-but-injury-interrupted)
-    profile with few close training comps - a known, accepted limitation
-    of this project's deliberately simple/interpretable model choice, not
-    a bug with an identified fix.
-    """
-    games_est = weighted_games_played.clip(upper=max_games)
-    games_missed = (RECENT_INJURY_THRESHOLD - prev_games_played).clip(lower=0)
-    if position is not None and (position == "QB").any():
-        intercept = pd.Series(BOUNCE_BACK_INTERCEPT, index=games_missed.index)
-        slope = pd.Series(BOUNCE_BACK_SLOPE, index=games_missed.index)
-        intercept = intercept.where(position != "QB", QB_BOUNCE_BACK_INTERCEPT)
-        slope = slope.where(position != "QB", QB_BOUNCE_BACK_SLOPE)
-        correction = (intercept + slope * games_missed).clip(lower=0)
-    else:
-        correction = (BOUNCE_BACK_INTERCEPT + BOUNCE_BACK_SLOPE * games_missed).clip(lower=0)
-    correction = correction.where(prev_games_played < RECENT_INJURY_THRESHOLD, 0)
-    return (games_est + correction).clip(upper=max_games)
-
-
-ELITE_Z_THRESHOLD = 1.0
-ELITE_RECENT_MISSED_TIME_THRESHOLD = 14
-ELITE_RECENT_INJURY_GAMES_BOOST = 1.24
-"""Additive games_est correction for players who are BOTH elite (top ~16%
-of their position by recency-weighted rate, wavg_ppg z-scored within
-position/season) AND recently missed some time (prev_games_played < 14) -
-see apply_elite_recent_injury_durability_boost's docstring for the full
-investigation (2026-08-28).
-"""
-
-
-def apply_elite_recent_injury_durability_boost(board: pd.DataFrame) -> pd.DataFrame:
-    """Add ELITE_RECENT_INJURY_GAMES_BOOST games to games_est for players
-    who are both elite (top ~16% of their position by wavg_ppg, z-scored
-    within position/season) and coming off a recently shortened season
-    (prev_games_played < 14) - a real, validated bias distinct from every
-    other durability correction in this pipeline.
-
-    Found 2026-08-28, investigating why Patrick Mahomes (durability side)
-    and Joe Burrow (durability + rate) ranked so far below their real
-    talent level, and the user's broader question: are two SEPARATELY
-    validated, individually-unbiased corrections (Ridge rate-shrinkage for
-    elite/unusual profiles, and the durability discount machinery)
-    compounding unfairly for players who land in BOTH populations at once?
-
-    Tested directly with an interaction regression (`games_resid ~
-    is_elite + recent_missed_time + is_elite*recent_missed_time`, walk-
-    forward, all positions pooled with position-standardized elite_z,
-    2018-2025, n=3513): the interaction term is real and significant
-    (coef +0.90, p=0.039). Group means make the shape clear - EVERY OTHER
-    combination of (elite, recently-missed-time) is at or below zero
-    (non-elite/healthy: -2.00; non-elite/missed-time: -0.40; elite/healthy:
-    -1.26 - even healthy elite players see some of the general durability
-    shrinkage already documented and reverted elsewhere) - but elite AND
-    recently-missed-time is the one cell that flips POSITIVE: +1.25 games,
-    n=176. Calibrated on 2018-2022 (mean +0.92, p=0.021), validated
-    out-of-sample on 2023-2025 (mean +1.77, p=0.0009) - the effect held up
-    AND grew out of sample, not shrank toward noise, a strong signal this
-    is real rather than a calibration-period fluke. Final constant (1.24)
-    is the full 2018-2025 pooled mean.
-
-    Real, intuitive mechanism: a true elite player missing some time is
-    more likely a real, explainable, one-off event (they keep their job
-    unquestioned, get real medical/support resources, aren't at risk of
-    a role change on top of the injury) - unlike a similar absence for a
-    replacement-level player, which more often reflects BOTH a real injury
-    AND underlying precariousness (losing snaps/role on top of the
-    injury) that compounds against them. This is the opposite direction
-    from, and a genuinely different population than, the general
-    durability-shrinkage finding (2026-08-28, tested and reverted for its
-    own rookie/veteran inconsistency) - that one showed high-games_est
-    players get OVER-estimated on average; this one is specifically about
-    the elite-AND-recently-hurt intersection being UNDER-estimated.
-
-    Directly answers the user's compounding-bias question: yes, for this
-    specific intersection, two individually-unbiased-on-average
-    corrections DO combine into a real, extra bias beyond what either
-    predicts alone - and it's now fixed with real, validated evidence,
-    not by hand-tuning one named player's number.
-
-    Uses wavg_ppg (already computed for every veteran prediction row, NOT
-    available for rookies - correctly a no-op for them, matching every
-    other veteran-only durability correction in this pipeline) and
-    prev_games_played, gating on the CURRENT prediction cohort's own
-    position/season distribution for elite_z, so it naturally recomputes
-    correctly every time the board is rebuilt.
-    """
-    board = board.copy()
-    elite_z = board.groupby("position")["wavg_ppg"].transform(lambda s: (s - s.mean()) / s.std())
-    is_elite = elite_z >= ELITE_Z_THRESHOLD
-    recent_missed_time = board["prev_games_played"] < ELITE_RECENT_MISSED_TIME_THRESHOLD
-    boosted = (is_elite & recent_missed_time).fillna(False)
-    board.loc[boosted, "games_est"] = (board.loc[boosted, "games_est"] + ELITE_RECENT_INJURY_GAMES_BOOST).clip(
-        upper=17
-    )
-    board["total_points_pred"] = board["ppg_pred"] * board["games_est"]
-    return board
-
-
 def compute_walk_forward_residuals(
     training_table: pd.DataFrame, start_season: int = 2018, end_season: int = 2026
 ) -> pd.DataFrame:
@@ -1619,7 +1568,8 @@ def compute_walk_forward_residuals(
             continue
         models = fit_vet_models_by_position(train)
         test["ppg_pred"] = predict_vet_ppg(models, test)
-        test["games_est"] = estimate_games_played(test["wavg_games_played"], test["prev_games_played"], test["position"])
+        durability_models = fit_durability_models_by_position(train)
+        test["games_est"] = predict_durability(durability_models, test)
         test["ppg_resid"] = test["ppg"] - test["ppg_pred"]
         test["games_resid"] = test["games_played"] - test["games_est"]
         results.append(test[["player_id", "season", "position", "games_est", "ppg_resid", "games_resid"]])
@@ -2491,17 +2441,19 @@ def apply_role_upgrade_durability_boost(board: pd.DataFrame, max_games: int = 17
     healthy 17-game starter season as recently as 2024 (games history 11/8/
     17/5). Lumping him into the same "own history is uninformative"
     treatment as a true never-started backup would have thrown away real,
-    relevant signal about him specifically - and it's exactly the case the
-    QB-specific bounce-back correction (estimate_games_played) already
+    relevant signal about him specifically - and it's exactly the
+    population the base durability model (at the time, the QB-specific
+    bounce-back correction inside estimate_games_played; since 2026-08-28,
+    the GBM durability model - see fit_durability_models_by_position)
     exists to handle correctly. Verified directly: for players excluded
     this way (a real starter season somewhere in the 3-year lookback,
     thin most-recent one), their OWN wavg_games_played DOES correlate with
     their real outcome (r=0.198, p=0.059 - much stronger than the true
     role-upgrade cohort's r=0.057, p=0.67), and their mean actual games
     (12.14) tracks reasonably close to their own wavg_games_played (9.08,
-    still somewhat underestimated - which is exactly what the existing
-    bounce-back correction is for). These players fall through to the
-    standard estimate_games_played path unchanged, not this function.
+    still somewhat underestimated at the time by the old linear formula).
+    These players fall through to the standard base durability model
+    unchanged, not this function.
     Constants refit on the correctly-narrowed cohort after adding this
     exclusion (values differ slightly from the pre-exclusion version).
 

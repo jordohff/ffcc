@@ -69,12 +69,14 @@ hand-edited or committed. Only code is committed.
   Only meaningful in-season, once trailing data exists - can't produce preseason rankings. Evaluated by
   MAE/R² since a specific point total is the point.
 - **Draft-rankings model** (`season.py`/`build_draft_rankings.py`): predicts a full season's per-game
-  rate from the PRIOR season's stats + age + team-change, separately estimates games played
-  (durability), and projects rookies from draft capital instead (no prior NFL stats to anchor on).
-  Meant for pre-draft use, before any current-season games exist. Evaluated by rank correlation
-  (Spearman) and top-N hit rate against actual season-end finish, since draft value is about
-  getting the ORDER right, not point-level precision. See the 2026-08-09 entry below for full detail,
-  results, and known limitations.
+  rate from the PRIOR season's stats + age + team-change (Ridge, per position), and SEPARATELY
+  estimates games played (durability) via a GBM model per position (see fit_durability_models_by_
+  position - replaced a linear recency-weighted-average + hand-patched-corrections formula on
+  2026-08-28, see that day's CLAUDE.md entries), and projects rookies from draft capital instead (no
+  prior NFL stats to anchor on). Meant for pre-draft use, before any current-season games exist.
+  Evaluated by rank correlation (Spearman) and top-N hit rate against actual season-end finish, since
+  draft value is about getting the ORDER right, not point-level precision. See the 2026-08-09 entry
+  below for full detail, results, and known limitations.
 - Add complexity only when asked — this file should be updated if/when the modeling approach evolves
   (e.g. moving beyond linear/ridge regression, adding more feature sources).
 
@@ -2763,4 +2765,84 @@ boards regenerated (740 rows each, no new NaN-merge issues).
 - but the SPECIFIC concern the user raised (elite players getting unfairly double-penalized) was real and is
 now fixed with genuine, out-of-sample-validated evidence, not a philosophical override of the model's
 caution.
+
+
+
+### 2026-08-28 - games_est rebuilt: GBM replaces the linear-plus-patches durability formula
+
+Direct continuation of the Dak Prescott investigation. User's question: "is .5/.3/.2 for the last 3 years the
+best way to look at this? is this punishing players too much for missing games?"
+
+**Tested the weighting-scheme question directly and empirically - answer: no, not really, and NOT via a
+robust statistic either.** `HISTORY_WEIGHTS = [0.5, 0.3, 0.2]` is a SHARED constant also used for rate-stat
+blending, never separately validated for durability specifically. Tested the natural "fix" for the user's
+exact intuition - MEDIAN of the last 3 seasons, which would fully ignore one outlier bad year (and would
+have completely rescued Dak: median(17,8,17)=17) - walk-forward evaluated across the full 2012-2025 window,
+all positions: median performs WORSE than the current weighted mean in EVERY position (overall MAE 3.71 vs
+3.64), as do equal weights, fewer years of history (1yr/2yr), or "max of last 2." Only a 4-year window with
+a modest 4th-year weight beat the current 3-year scheme, and only marginally (~0.5-1%). Real injuries carry
+genuine recurrence signal on average across the population, even when any INDIVIDUAL case (like Dak's) turns
+out fine - a statistic built to ignore a bad year throws away real predictive information. The weighting
+scheme itself was not the real problem.
+
+**The real lever, tested and validated separately: GBM.** Built `fit_durability_models_by_position` (one
+HistGradientBoostingRegressor per position, DURABILITY_FEATURES = prev_games_played, wavg_games_played,
+prev_made_playoffs, wavg_ppg, years_past_decline_age, team_changed, cap_percent - deliberately includes
+wavg_ppg, a talent proxy, unlike the old formula, letting a tree find the elite x recent-injury interaction
+automatically instead of it needing hand-discovery). Backtested through EVERY season with enough trailing
+history to predict at all (2012-2025, 14 seasons, minimum 391 players in any single season - user's explicit
+ask for "as many seasons as possible... at least 200 players per season," cleared comfortably): QB MAE
+3.164->3.117 (+1.5%), RB 3.859->3.443 (+10.8%), WR 3.598->3.197 (+11.1%), TE 3.362->3.200 (+4.8%), ALL
+3.555->3.251 (+8.6%) - real, consistent, position-general improvement, strongest at RB/WR.
+
+**User's explicit scope decision**: GBM replaces the BASE formula (the old recency-weighted average, the
+general bounce-back correction, the QB-specific bounce-back refit, AND the elite-recent-injury boost shipped
+earlier the same day - GBM should rediscover all of these automatically via its richer feature set) but does
+NOT replace the role-transition corrections (apply_role_upgrade_durability_boost, apply_qb_backup_games_est,
+apply_qb_starter_floor) - those depend on CURRENT depth-chart role, a live signal no model trained only on
+trailing historical stats can see, and stay layered on top exactly as before.
+
+**Real anomaly caught and fixed before shipping, not glossed over.** The first (unconstrained) GBM version
+predicted Jahmyr Gibbs (a perfectly healthy elite RB: prev_games_played=17, wavg_games_played=16.6) BELOW
+several less-healthy comps - a real instability, not just a surprising number. Checked whether this was
+overfit noise or a real pattern before reacting either way: pulled the real historical rate for RBs with
+prev_games_played==17 - mean actual NEXT-season games is only 13.57 (n=75), and the elite-and-perfectly-
+healthy subset matching Gibbs' exact profile averages 14.07-14.42 (n=19-30). The LOW number itself is real
+and validated - RB workload risk is largely independent of recent health, a genuine pattern the old linear
+formula never captured at all (it had nothing to correct for a fully healthy player). But the INSTABILITY
+(ranking a perfectly healthy player below LESS healthy ones, not just lower than intuition suggests) was a
+real, fixable problem: added `DURABILITY_MONOTONIC_CST` (prev_games_played and wavg_games_played forced
+non-decreasing; the other 5 features left unconstrained since they need to express real interactions, not a
+flat rule) - verified this is a STRICT improvement, not a safety/accuracy tradeoff (walk-forward MAE
+3.251->3.239, slightly better, not worse).
+
+**Removed, not left as dead code** (matching this project's standing discipline against confusing no-op
+landmines - see the reverted QB_STREAMING_DEPTH_MULTIPLIER): `estimate_games_played`, `RECENT_INJURY_
+THRESHOLD`, `BOUNCE_BACK_INTERCEPT`/`SLOPE`, `QB_BOUNCE_BACK_INTERCEPT`/`SLOPE`, and
+`apply_elite_recent_injury_durability_boost` with its constants - all fully superseded by the GBM model.
+Also updated `compute_walk_forward_residuals` (used by the Monte Carlo simulation, phases 1-2) to fit/use
+the same GBM durability model per walk-forward test season, so the simulation's residual pool matches what
+the real board actually uses.
+
+**Verified on the regenerated board (both scoring formats, 740 rows each, no new NaN-merge issues)**:
+- **Dak Prescott: rank 122 -> 69, VBD -25.96 -> +10.21 (now above replacement)** - games_est 14.63, a real,
+  validated improvement achieved by a properly-tested model learning from the WHOLE population, not by
+  hand-patching his specific case (which was explicitly tried and rejected earlier the same day).
+- Jahmyr Gibbs: games_est 14.27 (down from the old formula's 16.6, but now validated as the real historical
+  rate for his exact profile, not an artifact) - still ranks #3 overall on rate alone.
+- Patrick Mahomes: games_est 14.47, VBD ~0 (essentially unchanged from the earlier hand-patched investigation
+  - GBM independently arrives at a similar conclusion via a completely different mechanism).
+- Joe Burrow: games_est 13.13, VBD -48.41 - improved from the pre-GBM state but still clearly below
+  replacement, consistent with his situation being more severe on two fronts (rate AND durability) that no
+  single durability fix was ever going to fully resolve.
+- 2025 single-season backtest (printed at build time, a smaller sample than the full 2012-2025 validation
+  above but the number this project has historically cited as the headline): QB 0.734->0.741, RB
+  0.779->0.801, TE 0.807->0.815, WR 0.805->0.820 - improved across all four positions.
+
+This closes out the full investigation chain from this session: Mahomes (durability + rate diagnosis) ->
+Bo Nix vs Burrow/Lamar (verified real facts, confirmed existing mechanisms) -> "should we care about
+durability" (quantified: real but secondary, ~1-in-5 effect) -> compounding-bias test (shipped the elite-
+injury boost) -> Dak Prescott (exposed the boost's limits) -> weighting-scheme test (rejected median/simpler
+alternatives) -> GBM backtest and shipped as the new base durability model, replacing four separate hand-
+patched corrections with one validated, richer model.
 
