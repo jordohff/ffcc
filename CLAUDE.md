@@ -2376,3 +2376,44 @@ depth_chart_rank==3, a 2nd-round pick historically) similarly corrected: games_e
 unchanged (board-build-time fix, not a training-time change) - QB Spearman 0.734, same as before both QB fixes
 this session.
 
+
+
+### 2026-08-28 - does RB/WR/TE games_est have the same backup-role blind spot as QB? Checked, genuine null result
+
+Direct follow-up to the QB backup games_est fix - since that gap existed because games_est had no awareness of
+current depth-chart role, worth verifying (not assuming) that the same blind spot doesn't also affect RB/WR/TE,
+rather than trusting apply_role_security_discount's original reasoning ("a bench RB/WR/TE still dresses and
+plays real snaps most weeks") without a data check, especially right after that exact kind of assumption broke
+for QB.
+
+Pulled real games_played (including true zero-game seasons, left-joined not inner-joined) for RB/WR/TE at
+their already-validated role-security gate thresholds (RB>=3, WR>=3, TE>=2), contemporaneous week-1/2 depth
+chart, 2018-2024: RB gate median 9 games, WR gate median 8, TE gate median 9 - real backups, unlike QB (median
+3), genuinely do play about half a season on average, confirming the original reasoning was correct for these
+three positions.
+
+Checked the CURRENT board's games_est for the same gated population (existing games_est, not a hypothetical) -
+already closely matches: RB median 9.5, WR median 9.6, TE median 8.9. No gap to fix - the existing
+estimate_games_played/rookie-curve machinery for RB/WR/TE already lands close to the real backup-role number,
+unlike QB where the rookie curve was completely blind to current role. No code change - a genuine, checked
+null result, not an assumption left untested.
+
+
+
+### 2026-08-28 - team-level "how TE-friendly is this offense" signal: real but redundant, null result
+
+Tested a genuinely new hypothesis (distinct from the already-closed Freiermuth/Tremble market-overreaction
+finding, see the 2026-08-27 entries): does a team's historical tendency to target the TE position - not any
+one player's own usage, the OFFENSE's - predict TE fantasy output beyond what the player's own trailing
+target share already captures?
+
+Built `team_te_target_share` (sum of TE targets / sum of all-position targets, per team/season, REG only).
+Real, meaningfully sticky team-level trait: year-to-year persistence r=0.507 (a real scheme/system tendency,
+not noise). But walk-forward tested against the EXISTING TE model's own residual (2018-2025, prior-season
+team share lagged so it's known at prediction time): corr(prev_team_te_target_share, resid) = -0.007,
+p=0.8508, n=766 - no marginal value at all. Makes sense on reflection: if an offense is TE-friendly, that's
+already reflected in the player's own wavg_target_share/wavg_targets_pg (a rookie or new arrival on a
+TE-friendly team is the one case this wouldn't cover, but that's a small population and the aggregate test
+found nothing to work with regardless). Not shipped - a real signal that turned out to be fully redundant
+with what's already in the model, not a wasted or unjustified test.
+
