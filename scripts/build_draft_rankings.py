@@ -50,6 +50,8 @@ from ffmodel.season import (
     compute_team_position_ceiling,
     compute_team_season_pace,
     compute_vbd,
+    compute_rookie_walk_forward_residuals,
+    compute_walk_forward_residuals,
     estimate_games_played,
     evaluate_rankings,
     fit_rookie_curve,
@@ -58,6 +60,7 @@ from ffmodel.season import (
     project_rookies,
     project_team_pace,
     project_weekly_points,
+    simulate_season_outcomes,
 )
 
 RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
@@ -285,6 +288,18 @@ def main() -> None:
         flex_slots=args.flex_slots,
     )
     board = apply_qb_starter_floor(board)
+
+    print("Running Monte Carlo season simulation...")
+    vet_residuals = compute_walk_forward_residuals(training_table)
+    rookie_residuals = compute_rookie_walk_forward_residuals(rookie_table)
+    # A handful of UDFA rookies have no resolvable player_id (NaN) - the same
+    # NaN-merge-fan-out bug this project has hit repeatedly (pandas treats
+    # NaN as matching NaN, so a null-id row on both sides fans out into
+    # duplicates). Drop null-id rows from `sim` before merging.
+    sim = simulate_season_outcomes(board, vet_residuals, rookie_residuals)
+    sim = sim.dropna(subset=["player_id"])
+    board = board.merge(sim, on="player_id", how="left")
+
     board = board.sort_values("vbd", ascending=False)
     board = board.round(2)
 

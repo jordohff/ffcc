@@ -1498,6 +1498,174 @@ def estimate_games_played(
     return (games_est + correction).clip(upper=max_games)
 
 
+def compute_walk_forward_residuals(
+    training_table: pd.DataFrame, start_season: int = 2018, end_season: int = 2026
+) -> pd.DataFrame:
+    """Real historical (ppg_resid, games_resid) pairs for the VETERAN model:
+    train on everything before each test season, predict that season, and
+    keep how wrong the prediction actually was (actual - predicted) - the
+    same walk-forward mechanics `backtest()` in build_draft_rankings.py
+    already uses to report Spearman/hit-rate, just keeping the raw errors
+    instead of summarizing them.
+
+    This is the raw material for simulate_season_outcomes: instead of
+    trusting a single point estimate, resample from what prediction errors
+    have REALLY looked like, by position, to build a realistic distribution
+    of possible outcomes around today's prediction.
+
+    ppg_resid and games_resid are kept as PAIRED draws (same player-season,
+    same row) rather than sampled independently in simulate_season_outcomes -
+    a season that fell short on games (e.g. a real injury) often also has a
+    correlated rate effect, and drawing the two independently would invent
+    unrealistic combinations (e.g. a near-zero games_est stacked with a
+    strongly positive rate surprise) that never actually happen together.
+
+    Reflects BASE-MODEL variance only - not the additional board-time
+    corrections (role-security discount, role-upgrade boosts, QB backup
+    games_est, team opportunity cap, QB starter floor) applied afterward in
+    build_draft_rankings.py, which are bias fixes to the mean, not
+    variance estimates. simulate_season_outcomes applies this same
+    positional variance around the FINAL, corrected point estimate - a
+    reasonable MVP simplification, but it means a player in one of those
+    special-case cohorts (e.g. a role-upgrade QB like Malik Willis) likely
+    has WIDER true uncertainty than a normal established player at the same
+    position, which this does not yet capture. Worth revisiting if the
+    simulation output is used heavily for exactly those edge cases.
+    """
+    results = []
+    for test_season in range(start_season, end_season):
+        train = training_table[training_table["season"] < test_season]
+        test = training_table[training_table["season"] == test_season].dropna(subset=["wavg_ppg"]).copy()
+        if train.empty or test.empty:
+            continue
+        models = fit_vet_models_by_position(train)
+        test["ppg_pred"] = predict_vet_ppg(models, test)
+        test["games_est"] = estimate_games_played(test["wavg_games_played"], test["prev_games_played"], test["position"])
+        test["ppg_resid"] = test["ppg"] - test["ppg_pred"]
+        test["games_resid"] = test["games_played"] - test["games_est"]
+        results.append(test[["player_id", "season", "position", "ppg_resid", "games_resid"]])
+    return pd.concat(results, ignore_index=True) if results else pd.DataFrame(
+        columns=["player_id", "season", "position", "ppg_resid", "games_resid"]
+    )
+
+
+def compute_rookie_walk_forward_residuals(
+    rookie_table: pd.DataFrame, start_season: int = 2018, end_season: int = 2026
+) -> pd.DataFrame:
+    """Same idea as compute_walk_forward_residuals, but for the ROOKIE curve
+    (fit_rookie_curve) instead of the veteran Ridge model - a true rookie
+    has no NFL track record to anchor a prediction on, so it's a much
+    noisier, higher-variance guess than a veteran's own trailing history,
+    and using veteran residual variance for rookies in simulate_season_
+    outcomes would understate that. Walk-forward: fit the pick->production
+    curve on draft classes before each test season, apply it to that
+    season's real class, and keep the real (actual - predicted) errors.
+    """
+    results = []
+    for test_season in range(start_season, end_season):
+        train = rookie_table[rookie_table["season"] < test_season]
+        test = rookie_table[rookie_table["season"] == test_season].copy()
+        if train.empty or test.empty:
+            continue
+        curve = fit_rookie_curve(train)
+        test = test.merge(curve, on="position", how="left").dropna(subset=["ppg_slope"])
+        if test.empty:
+            continue
+        log_pick = np.log(test["pick"].to_numpy(dtype=float))
+        ppg_pred = (test["ppg_intercept"] + test["ppg_slope"] * log_pick).clip(lower=0)
+        games_pred = (test["games_intercept"] + test["games_slope"] * log_pick).clip(lower=0, upper=17)
+        test["ppg_resid"] = test["ppg"] - ppg_pred
+        test["games_resid"] = test["games_played"] - games_pred
+        results.append(test[["player_id", "season", "position", "ppg_resid", "games_resid"]])
+    return pd.concat(results, ignore_index=True) if results else pd.DataFrame(
+        columns=["player_id", "season", "position", "ppg_resid", "games_resid"]
+    )
+
+
+def simulate_season_outcomes(
+    board: pd.DataFrame,
+    vet_residuals: pd.DataFrame,
+    rookie_residuals: pd.DataFrame,
+    n_sims: int = 2000,
+    seed: int = 42,
+    max_games: int = 17,
+) -> pd.DataFrame:
+    """Monte Carlo season-outcome simulation for every player on the final
+    board (not just rookies, which already had a static p10/p90 lookup via
+    compute_rookie_outcome_range - this gives the whole board a real
+    simulated distribution, not just two percentile numbers).
+
+    For each player, draws n_sims (ppg_resid, games_resid) pairs (see
+    compute_walk_forward_residuals) from real historical prediction errors
+    for their position - veterans draw from vet_residuals, rookies (board's
+    `is_rookie` flag) draw from rookie_residuals, since a true rookie's
+    real uncertainty is structurally different (higher-variance, no NFL
+    track record) from a veteran's. Adds each draw to the player's OWN
+    final ppg_pred/games_est (after every board-time correction), clips to
+    realistic bounds (ppg >= 0, games in [0, max_games]), and multiplies to
+    get a simulated season total.
+
+    Reports the simulated distribution as percentiles (p10/p25/median/p75/
+    p90 of total points) plus two derived, decision-relevant probabilities:
+    - sim_bust_prob: P(simulated total < this position's replacement level)
+      - "how often does this pick fail to outscore what's on the wire."
+    - sim_boom_prob: P(simulated total >= this position's own current top-5
+      average total_points_pred) - a dynamic, self-consistent "elite tier"
+      bar (recomputed from the board itself each run, not a hardcoded
+      number), answering "how often does this pick have a top-5-at-position
+      caliber season" - directly useful for the "draft for upside" framing
+      this project has repeatedly validated over discounting for volatility
+      (see the rejected risk-adjusted-VBD research).
+    """
+    rng = np.random.default_rng(seed)
+    replacement_by_pos = board.groupby("position")["replacement_points"].first()
+    boom_by_pos = board.groupby("position")["total_points_pred"].apply(lambda s: s.nlargest(5).mean())
+
+    summaries = []
+    for position, group in board.groupby("position"):
+        vet_pool = vet_residuals[vet_residuals["position"] == position]
+        rookie_pool = rookie_residuals[rookie_residuals["position"] == position]
+        if vet_pool.empty and rookie_pool.empty:
+            continue
+
+        ppg_pred = group["ppg_pred"].to_numpy()
+        games_est = group["games_est"].to_numpy()
+        is_rookie = group["is_rookie"].fillna(0).to_numpy().astype(bool)
+        n_players = len(group)
+
+        ppg_draws = np.zeros((n_players, n_sims))
+        games_draws = np.zeros((n_players, n_sims))
+        for mask, pool in [(is_rookie, rookie_pool), (~is_rookie, vet_pool)]:
+            if not mask.any():
+                continue
+            use_pool = pool if not pool.empty else (rookie_pool if pool is vet_pool else vet_pool)
+            idx = rng.integers(0, len(use_pool), size=(mask.sum(), n_sims))
+            ppg_draws[mask] = ppg_pred[mask][:, None] + use_pool["ppg_resid"].to_numpy()[idx]
+            games_draws[mask] = games_est[mask][:, None] + use_pool["games_resid"].to_numpy()[idx]
+
+        ppg_draws = np.clip(ppg_draws, 0, None)
+        games_draws = np.clip(np.round(games_draws), 0, max_games)
+        total_draws = ppg_draws * games_draws
+
+        replacement_pts = replacement_by_pos.get(position, 0.0)
+        boom_pts = boom_by_pos.get(position, np.inf)
+        summaries.append(
+            pd.DataFrame(
+                {
+                    "player_id": group["player_id"].to_numpy(),
+                    "sim_p10": np.percentile(total_draws, 10, axis=1),
+                    "sim_p25": np.percentile(total_draws, 25, axis=1),
+                    "sim_median": np.percentile(total_draws, 50, axis=1),
+                    "sim_p75": np.percentile(total_draws, 75, axis=1),
+                    "sim_p90": np.percentile(total_draws, 90, axis=1),
+                    "sim_bust_prob": (total_draws < replacement_pts).mean(axis=1),
+                    "sim_boom_prob": (total_draws >= boom_pts).mean(axis=1),
+                }
+            )
+        )
+    return pd.concat(summaries, ignore_index=True) if summaries else pd.DataFrame()
+
+
 # Sleeper and nflverse otherwise agree on team codes, but use different
 # abbreviations for these two teams - normalize to nflverse's convention
 # (used everywhere else in this pipeline) before comparing/using Sleeper's

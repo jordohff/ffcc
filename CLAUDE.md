@@ -2417,3 +2417,61 @@ TE-friendly team is the one case this wouldn't cover, but that's a small populat
 found nothing to work with regardless). Not shipped - a real signal that turned out to be fully redundant
 with what's already in the model, not a wasted or unjustified test.
 
+
+
+### 2026-08-28 - Monte Carlo season simulation (phase 1): every player, not just rookies
+
+User asked to start running Monte Carlo-style simulation to "bounce against" the model, in addition to the
+targeted investigations above. Scoped as a 3-phase plan before building anything: (1) residual-bootstrap
+per-player season simulation - the piece built this round; (2) roster-level simulation (a full drafted team's
+season, reusing the real schedule/matchup infrastructure); (3) correlated cross-player simulation (a bad QB
+week dragging his receivers down together, dynamic vacated-opportunity on injury) - deferred, most novel/
+hardest, only worth it if phase 1/2 prove useful.
+
+**Design**: `compute_walk_forward_residuals` (season.py) reuses the exact walk-forward mechanics already in
+`backtest()` (train on seasons < T, predict T, 2018-2025) but keeps the raw (actual - predicted) errors for
+both ppg AND games_played, PAIRED by player-season (not sampled independently) - a season that fell short on
+games often has a correlated rate effect too, and independent sampling would invent combinations that don't
+really happen (e.g. a near-zero games_est paired with a strongly positive rate surprise). Built a SEPARATE
+`compute_rookie_walk_forward_residuals` for the rookie pick-curve specifically, rather than reusing veteran
+residuals for rookies - a true rookie's uncertainty is structurally different (no NFL track record at all),
+and `simulate_season_outcomes` picks the right pool per player via the board's existing `is_rookie` flag.
+
+`simulate_season_outcomes`: for each player, draws n_sims=2000 (ppg_resid, games_resid) pairs from their
+position's real historical error distribution, adds to their own FINAL point estimate (after every board-time
+correction - role-security discount, role-upgrade boosts, QB backup games_est, team opportunity cap, QB
+starter floor), clips to realistic bounds, and reports the simulated total-points distribution as percentiles
+(p10/p25/median/p75/p90) plus two decision-relevant probabilities: `sim_bust_prob` (P(total < this position's
+own replacement level) - "how often does this pick fail to beat the wire") and `sim_boom_prob` (P(total >=
+this position's own current top-5 average, a dynamic self-consistent "elite tier" bar, not a hardcoded number)
+- "how often is this a league-winning-caliber season"). Directly operationalizes the "draft for upside, don't
+draft scared" philosophy this project has repeatedly validated with data (see the rejected risk-adjusted-VBD
+research) - a single point estimate can't distinguish a safe-floor player from a high-variance one with the
+same total_points_pred, this can.
+
+**Explicitly scoped limitation, not silently glossed over**: the residual pool reflects BASE-MODEL variance
+only, not the extra uncertainty specific to board-time-corrected edge cases (e.g. a role-upgrade QB like Malik
+Willis is probably genuinely less certain than a normal established starter at the same position) - applying
+positional variance uniformly around the corrected mean is a reasonable phase-1 simplification, not a claim
+that every player's true uncertainty is captured perfectly. Flagged in the code for a future revisit.
+
+**Real bug caught before shipping - the same NaN-merge-fan-out class this project has hit repeatedly**: the
+first version merged simulation output onto the board on `player_id` without dropping the ~7 UDFA rookies
+with unresolvable gsis_id (NaN) from the simulation output first - board rows jumped 740 -> 782 (pandas
+matches NaN against NaN, fanning every null-id board row out against every null-id sim row). Fixed by
+dropping null-`player_id` rows from `sim` before the merge, same pattern already used throughout this
+pipeline. Verified: board back to 740 rows, exactly the same 7 known UDFA players (already a documented,
+deliberately-deferred gap) correctly get null sim columns rather than a wrong or duplicated one.
+
+**Sanity-checked the output against players already well understood from this session's other work**:
+Christian McCaffrey (real age/injury risk, extensively investigated earlier this project) shows a real,
+balanced boom/bust profile (bust_prob 0.24, boom_prob 0.28) rather than either extreme - matches the "genuine
+uncertainty, not a bug" conclusion already reached about him. Malik Willis (this session's most-corrected QB)
+shows bust_prob 0.87/boom_prob 0.03 - mostly a bust outcome with real but small rushing-driven upside, matching
+every finding from his own investigation. Jahmyr Gibbs (RB1) shows boom_prob 0.49 - about a coin flip at a
+top-5-RB-caliber season, a sensible number for the consensus RB1.
+
+Wired into build_draft_rankings.py right after apply_qb_starter_floor (the final point-estimate step), columns
+added directly onto the main board CSV rather than a separate output file, so every player's simulated range
+sits right next to their point estimate. Regenerated both boards (740 rows each, unchanged).
+
