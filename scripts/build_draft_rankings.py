@@ -29,6 +29,7 @@ from ffmodel.season import (
     add_prior_starter_season_flag,
     add_recent_injury_history_flag,
     apply_current_team_from_sleeper,
+    apply_qb_backup_games_est,
     apply_qb_role_upgrade_boost,
     apply_qb_starter_floor,
     apply_role_security_discount,
@@ -250,6 +251,7 @@ def main() -> None:
 
     print("Applying role-security discount for players with no current-depth-chart security...")
     board = apply_role_security_discount(board)
+    board = apply_qb_backup_games_est(board, draft_picks)
     board = add_recent_injury_history_flag(board, injuries, args.draft_season)
     board = add_prior_starter_season_flag(board, season_stats, args.draft_season)
     board = apply_qb_role_upgrade_boost(board)

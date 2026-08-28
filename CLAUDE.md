@@ -2297,3 +2297,82 @@ accepted or dismissed on priors. No code change. Matches this project's standing
 a plausible, user-flagged pattern at the scale needed to actually trust the answer, even when an earlier,
 narrower test already pointed the same direction.
 
+
+
+### 2026-08-28 - LV Mendoza/Cousins investigation: found and fixed a real, previously-untested QB gap
+
+Followed up on the open thread from the 2026-08-27 refresh run: LV's Fernando Mendoza (2026 #1 overall pick,
+depth_chart_rank==2) projected at 253.78 total points purely from the rookie draft-capital curve, ahead of
+Kirk Cousins (the real, current depth_chart_rank==1 starter, 95.38 points) - "a highly-drafted rookie backup
+outprojecting the actual starter," flagged but not investigated at the time.
+
+**Verified the real-world situation first, per this project's standing practice**: web search confirms Cousins
+is the settled 2026 Week 1 starter - Raiders' HC "has made it pretty clear" he wants Cousins to start, "not...
+a true competition," and Mendoza has "primarily been working with the second team" despite being the top
+overall pick. Our own depth chart data (Cousins rank 1, Mendoza rank 2) is correct and current, not stale -
+this is a real projection-logic problem, not a data-freshness one.
+
+**Root cause: QB was the one position explicitly excluded from `apply_role_security_discount`** (see that
+function's own docstring, prior version: "QB: no threshold - not tested here... zero QB mismatches in
+FantasyPros top 200"). That conclusion was a weak, indirect signal (aggregate rank alignment) and predates
+nearly every QB-specific fix shipped since (role-upgrade boost, starter floor, durability redesign) - worth
+re-testing directly with the same rigor already used for RB/WR/TE, not trusting a stale conclusion. Re-ran the
+exact same methodology (contemporaneous week-1/2 historical depth chart rank vs. walk-forward QB Ridge
+predictions, 2018-2024): depth_chart_rank>=2 shows a real, large, highly significant overprediction bias -
+n=163, ratio (actual/predicted) 0.712, mean actual-minus-predicted -2.17 ppg, p<0.0001. Unlike RB (where
+rank==2 alone wasn't significant - ratio 0.937, committee value), QB's rank==2 alone is already strongly
+biased (n=138, ratio 0.707) - makes sense given QB is a binary, no-committee-value position: a real backup QB
+essentially never plays meaningful snaps behind a healthy starter. depth_chart_rank==1 (real starters) shows
+ratio 1.08, matching the same mild-underprediction pattern already documented at RB1/WR1 - confirms this is
+the same real phenomenon at QB, not a fluke.
+
+**Shipped**: added `"QB": 2` to `ROLE_SECURITY_DEPTH_THRESHOLD` and `"QB": 0.71` to `ROLE_SECURITY_DISCOUNT`
+(season.py) - same mechanism already live for RB/WR/TE, no new code path. This one fix resolves BOTH this
+session's Mendoza investigation AND the previously-flagged-but-unfixed Will Levis (TEN) gap from 2026-08-27 -
+both were symptoms of the same missing QB gate.
+
+**Verified on the regenerated board (both scoring formats)**: Mendoza's total_points_pred 253.78 -> 196.81
+(overall rank 86 -> 166, QB rank -> 21st), a real, substantial, evidence-based correction - not eliminated
+entirely, since a talented former #1 pick still carries real value even discounted for role, but no longer
+projected as if he already has the job. Will Levis (TEN, depth_chart_rank==3) similarly corrected:
+total_points_pred 68.26 (was inflated by an undiscounted ppg_pred despite games_est already reflecting his
+real limited role) - matches the fix's intent exactly. Malik Willis (depth_chart_rank==1, untouched by this
+gate) unaffected as expected, confirming no unintended side effect on QB1s. Backtest headline numbers
+unchanged (this is a board-build-time adjustment, same as every other role-transition fix, not a training-
+time change) - QB Spearman 0.734, matching the pre-fix value.
+
+**User pushback, correctly caught a real remaining gap**: even after the ppg discount, Mendoza (166 overall)
+still outranked Malik Willis (298, an actual current QB1) - "still hard to get behind why Willis is so far
+behind Mendoza when we know Mendoza is likely not playing to start the season." Right call: the ppg discount
+alone didn't touch `games_est`, which for Mendoza still came from the rookie draft-capital curve (15.98 - a
+near-full season) with zero awareness of his current backup role. Confirmed the same real gap independently
+affected `apply_role_security_discount`'s design generally: that function deliberately leaves games_est alone
+for RB/WR/TE backups, correctly, since a bench RB/WR/TE still dresses and plays real limited snaps most weeks
+- but a real backup QB is structurally different, playing close to ZERO snaps all season unless the starter
+is hurt or benched, so leaving games_est untouched for a QB backup was a real, distinct miss, not just an
+extension of the same already-correct RB/WR/TE design.
+
+**Verified this properly rather than assuming the fix**: pulled REAL games_played (including true zero-game
+seasons via a left-join, not a survivorship-biased inner join) for every QB at a real, contemporaneous
+week-1/2 depth_chart_rank>=2 snapshot, 2018-2024 (n=317). Mean games played: 3.96, MEDIAN 3.0 - most real
+backup QBs play almost nothing all season. Checked whether draft pick predicts more of a chance (plausible -
+a team is more likely to eventually turn to a highly-drafted backup than a journeyman): real, clean, monotonic
+signal (r=-0.341, n=225 with a known pick) - picks 1-32 average 6.56 games, 33-64 average 4.95, 65-100 average
+4.02, 100+/undrafted ~2.9-3.0. Checked a second candidate split (a proven-but-demoted veteran backup,
+had_real_starter_season) - real but modest (4.85 vs 3.78 games, n=54 vs 263) and much weaker than the pick-tier
+signal, so left out rather than stacked onto an already-small subgroup.
+
+**Shipped `apply_qb_backup_games_est`** (season.py): REPLACES (not multiplicatively discounts - matching the
+"replace, don't patch" precedent from the durability role-upgrade redesign) games_est for any QB at
+depth_chart_rank>=2 with the empirical tier value for their own career draft pick (any season, not rookies
+only - a veteran who was highly drafted years ago but is a backup again this year draws on the same real
+signal). Wired into build_draft_rankings.py right after apply_role_security_discount.
+
+**Verified on the regenerated board**: Mendoza's games_est 15.98 -> 6.5 (his real pick-1 tier), total_points_pred
+196.81 -> 80.07, overall rank 166 -> 672 - now correctly well below both Cousins (398) and, critically, Malik
+Willis (297, an actual real starter) - resolving exactly the inversion flagged. Will Levis (TEN,
+depth_chart_rank==3, a 2nd-round pick historically) similarly corrected: games_est 13.03 -> 5.0, total_points_pred
+68.26 -> 26.2. Aidan O'Connell (LV, rank3) games_est -> 3.0 (undrafted/low-pick tier). Backtest headline numbers
+unchanged (board-build-time fix, not a training-time change) - QB Spearman 0.734, same as before both QB fixes
+this session.
+

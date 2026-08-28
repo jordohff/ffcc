@@ -1658,13 +1658,14 @@ def compute_team_position_ceiling(
     return pd.DataFrame(rows).melt(id_vars="team", var_name="position", value_name="ceiling")
 
 
-ROLE_SECURITY_DEPTH_THRESHOLD = {"RB": 3, "WR": 3, "TE": 2}
+ROLE_SECURITY_DEPTH_THRESHOLD = {"RB": 3, "WR": 3, "TE": 2, "QB": 2}
 """Current depth_chart_rank at or above which a player gets the role-
-security discount (ROLE_SECURITY_DISCOUNT). QB has no entry - not needed,
-see apply_role_security_discount's docstring.
+security discount (ROLE_SECURITY_DISCOUNT). See apply_role_security_discount's
+docstring for QB's derivation (added 2026-08-28, after the original QB
+"not needed" conclusion was retested and found wrong).
 """
 
-ROLE_SECURITY_DISCOUNT = {"RB": 0.78, "WR": 0.78, "TE": 0.84}
+ROLE_SECURITY_DISCOUNT = {"RB": 0.78, "WR": 0.78, "TE": 0.84, "QB": 0.71}
 
 
 def apply_role_security_discount(board: pd.DataFrame) -> pd.DataFrame:
@@ -1740,9 +1741,39 @@ def apply_role_security_discount(board: pd.DataFrame) -> pd.DataFrame:
       stays too deep/inconsistently charted that far down to measure
       reliably, so this pipeline doesn't try to go deeper than rank 3)
     - TE: depth_chart_rank>=2 -> ratio 0.844
-    - QB: no threshold - not tested here, and this whole investigation's
-      earlier board-vs-FantasyPros check already found zero QB mismatches
-      in the top 200, so there's no known problem to fix.
+    - QB: depth_chart_rank>=2 -> ratio 0.71 (added 2026-08-28, see below -
+      the ORIGINAL "not needed" conclusion here was wrong and has been
+      corrected)
+
+    QB ADDED 2026-08-28, investigating the LV Fernando Mendoza/Kirk Cousins
+    situation: Mendoza (a rookie, depth_chart_rank==2, LV's real Week 1
+    starter genuinely undecided per live reporting as of late August)
+    projected at total_points_pred=253.78 via the rookie curve alone -
+    nearly a full healthy-starter season - with nothing discounting him for
+    not currently being QB1, while Cousins (the actual current
+    depth_chart_rank==1) sat at 95.38. The original "no threshold - zero
+    QB mismatches in FantasyPros top 200" conclusion predates essentially
+    every QB-specific fix shipped since (role-upgrade boost, starter floor,
+    durability redesign) and was a much weaker, indirect signal (aggregate
+    rank alignment) than the CONTEMPORANEOUS walk-forward test actually
+    used to derive RB/WR/TE's thresholds - worth directly re-testing with
+    the same rigor rather than trusting a stale conclusion. Ran the exact
+    same test (week-1/2 historical depth chart, 2018-2024 - 2025 uses a
+    different live-only schema, see load_current_depth_chart - vs.
+    walk-forward QB Ridge predictions): depth_chart_rank>=2 shows a real,
+    large, highly significant overprediction bias (n=163, ratio 0.712,
+    mean actual-minus-predicted -2.17 ppg, p<0.0001) - even larger/more
+    significant than RB/WR/TE's own numbers, and unlike RB, rank==2 ALONE
+    is already strongly significant here (n=138, ratio 0.707) with no need
+    for a rank>=3-only gate - consistent with QB being a binary, no-
+    committee-value position (a real backup QB essentially never plays
+    meaningful snaps behind a healthy starter, unlike a committee RB2/WR2).
+    depth_chart_rank==1 (real starters) shows ratio 1.08, matching the
+    same slight-underprediction pattern already seen at RB1/WR1 - further
+    confirming this is the same real phenomenon, not something special to
+    QB. This one fix closes both this session's Mendoza investigation AND
+    the previously-flagged-but-unfixed Will Levis (TEN) durability gap
+    (2026-08-27 entry) - both were symptoms of the same missing QB gate.
 
     Applied BEFORE apply_team_opportunity_cap in the pipeline - discounting
     a gated backup's points first means they contribute less to their
@@ -1758,6 +1789,107 @@ def apply_role_security_discount(board: pd.DataFrame) -> pd.DataFrame:
     board.loc[gated, "ppg_pred"] = board.loc[gated, "ppg_pred"] * discount[gated]
     board["total_points_pred"] = board["ppg_pred"] * board["games_est"]
     return board
+
+
+QB_BACKUP_GAMES_EST_PICK_TIERS = [(32, 6.5), (64, 5.0), (100, 4.0)]
+QB_BACKUP_GAMES_EST_UNDRAFTED = 3.0
+"""Real games_played tier lookup for a CURRENT QB backup (depth_chart_rank
+>= 2), by the player's own career draft pick number - see
+apply_qb_backup_games_est's docstring. Ordered (upper_pick_bound, games)
+pairs, checked in order; anyone drafted later than pick 100, or never
+drafted at all, gets QB_BACKUP_GAMES_EST_UNDRAFTED.
+"""
+
+
+def apply_qb_backup_games_est(board: pd.DataFrame, draft_picks: pd.DataFrame) -> pd.DataFrame:
+    """Replace games_est for a CURRENT QB backup (depth_chart_rank >= 2)
+    with a real, empirically-derived value based on the player's own career
+    draft pick - the games_est a backup QB arrives with (the rookie pick-
+    curve for a rookie, or the standard veteran durability estimate for an
+    established backup) has NOTHING to do with their current backup role,
+    since neither path knows about depth_chart_rank at all.
+
+    Found 2026-08-28, same investigation as apply_role_security_discount's
+    QB addition: LV's Fernando Mendoza (2026 #1 overall pick,
+    depth_chart_rank==2 behind Kirk Cousins, confirmed via real reporting to
+    be working mostly with the second team) still ranked ABOVE Malik Willis
+    (an actual current QB1) even after the ppg-rate discount above, because
+    Mendoza's games_est (15.98, from the rookie curve, which only knows his
+    draft pick - not that he's a backup) was left untouched - the ppg
+    discount alone doesn't fix a QB whose real problem is durability
+    (expected snaps), not rate.
+
+    A QB backup is structurally different from a backup at any other
+    position here: apply_role_security_discount deliberately leaves
+    games_est alone for RB/WR/TE backups, because a bench RB/WR/TE still
+    dresses and plays real (if limited) snaps almost every week - only their
+    RATE is suppressed. An NFL team active-rosters exactly one primary
+    backup QB who, unless the starter is hurt or benched, plays close to
+    ZERO meaningful snaps all season - so a real QB backup's constraint is
+    almost entirely about durability (how many games does the starter
+    ahead of them actually miss), not rate.
+
+    Verified this directly rather than assuming it: pulled REAL games_played
+    (including true zero-game seasons - a left-join against season_stats,
+    which only has rows for players with >=1 game, would otherwise
+    survivorship-bias this UP) for every QB at a real, contemporaneous
+    week-1/2 depth_chart_rank>=2 snapshot, 2018-2024 (n=317). Mean games
+    played is 3.96, MEDIAN 3.0 - most backup QBs play almost nothing all
+    season. Checked whether this is uniform or varies with something
+    knowable at prediction time: draft pick number correlates meaningfully
+    (r=-0.341, n=225 with a known pick) - a real, plausible signal, since a
+    team is more likely to eventually turn to a highly-drafted backup than a
+    journeyman. Bucketed by pick (matching standard round boundaries):
+    picks 1-32 average 6.56 games (median 6.0), 33-64 average 4.95 (median
+    4.0), 65-100 average 4.02 (median 4.0), 100+/undrafted average ~2.9-3.0
+    (median 2.0-3.0) - real signal, not noise (a clean, monotonic decline
+    across buckets). Checked one more candidate split (had_real_starter_
+    season, i.e. a proven-but-demoted veteran backup) - real but modest
+    (4.85 vs 3.78 games, n=54 vs 263) and much weaker than the pick-tier
+    signal, so not added as a second dimension - keeping this to the one
+    well-powered, clearly-monotonic signal rather than stacking a smaller
+    effect onto a small subgroup (the same sparse-intersection trap this
+    project has been burned by before - see add_age_curve_features).
+
+    This is a REPLACEMENT, not a multiplicative discount (matching the
+    "replace, don't patch" precedent from apply_role_upgrade_durability_
+    boost's redesign) - the existing games_est for a backup carries no real
+    information about their true situation (a rookie curve or veteran
+    durability estimate answers "how good/durable is this player," not "how
+    many snaps will the guy ahead of them leave on the table"), so patching
+    it multiplicatively would still be anchored to a mostly-irrelevant base
+    number.
+
+    Uses each player's own career draft pick (any season, not just this
+    draft class) - deliberately NOT limited to rookies. A veteran QB who was
+    highly drafted years ago but is a backup again this year (e.g. after
+    losing a job) draws on the same real signal, and restricting this to
+    rookies only would arbitrarily ignore that population.
+
+    Applied after apply_role_security_discount (so the ppg discount and this
+    games replacement both land on the board), before compute_vbd.
+    """
+    board = board.copy()
+    picks = (
+        draft_picks.dropna(subset=["gsis_id"])
+        .sort_values("season")
+        .drop_duplicates(subset="gsis_id", keep="first")[["gsis_id", "pick"]]
+        .rename(columns={"gsis_id": "player_id", "pick": "career_draft_pick"})
+    )
+    board = board.merge(picks, on="player_id", how="left")
+
+    def games_for_pick(pick: float) -> float:
+        if pd.isna(pick):
+            return QB_BACKUP_GAMES_EST_UNDRAFTED
+        for upper, games in QB_BACKUP_GAMES_EST_PICK_TIERS:
+            if pick <= upper:
+                return games
+        return QB_BACKUP_GAMES_EST_UNDRAFTED
+
+    is_backup = (board["position"] == "QB") & (board["depth_chart_rank"] >= 2)
+    board.loc[is_backup, "games_est"] = board.loc[is_backup, "career_draft_pick"].apply(games_for_pick)
+    board["total_points_pred"] = board["ppg_pred"] * board["games_est"]
+    return board.drop(columns=["career_draft_pick"])
 
 
 QB_ROLE_UPGRADE_MIN_GAMES = 8
