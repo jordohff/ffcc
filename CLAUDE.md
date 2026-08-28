@@ -2475,3 +2475,62 @@ Wired into build_draft_rankings.py right after apply_qb_starter_floor (the final
 added directly onto the main board CSV rather than a separate output file, so every player's simulated range
 sits right next to their point estimate. Regenerated both boards (740 rows each, unchanged).
 
+
+
+### 2026-08-28 - Monte Carlo phase 2: roster-level simulation, plus a real bug and a real discovery it surfaced
+
+Built `simulate_roster_outcomes` (season.py) and `scripts/simulate_roster.py` - given a specific drafted
+roster (player names, via `--players` or `--roster-file`), simulates the TEAM's season-total distribution by
+summing each player's simulated outcome WITHIN the same simulated universe (same draw index), not by combining
+separately-computed per-player percentiles (statistically wrong - P10+P10 isn't the P10 of a sum). Refactored
+the phase-1 draw logic into a shared `_draw_simulated_totals` helper used by both `simulate_season_outcomes`
+and the new roster function, to avoid duplicating the resampling mechanics.
+
+**Real bug caught while validating phase 2, not shipped blind**: testing a 10-player stud-heavy sample roster,
+the simulated team median (2151.8) sat ~9% below the naive sum of the roster's own total_points_pred (2371.4) -
+a gap that shouldn't exist if the simulation is unbiased around the point estimates. Diagnosed directly:
+`_draw_simulated_totals` pooled games_resid by POSITION only, ignoring the historical row's own games_est
+level. Since real games_played is hard-bounded at [0,17], a historical row with games_est already near 17 has
+real, asymmetric room (mostly downside, little upside) - correct for THAT row - but applying the SAME pooled,
+already-asymmetric distribution to every player regardless of their own games_est, then re-clipping again,
+double-penalized players whose OWN games_est was already high (studs like Gibbs, games_est=16.6) while
+under-penalizing low-games_est players in the same pool. Quantified: -18.4 point mean gap (-15.5%) for the
+games_est 15-16 bucket, +5.6 points for the 5-10 bucket (opposite-direction bias at both ends, not noise).
+Fixed by adding `GAMES_EST_BUCKETS` and conditioning the residual pool on BOTH position AND the historical
+row's own games_est bucket (falling back to the whole position pool if a specific cell has under 20 rows) -
+verified real historical bucket sample sizes are adequate (70-550 per position/bucket cell) before shipping.
+
+**The fix narrowed but did NOT fully close the gap - investigated further rather than accepting a smaller
+residual bias as "good enough," and found something real and unexpected**: even after bucketing, high-
+games_est players still showed a real ~9% simulated-mean shortfall vs. their own point estimate. Checked
+whether this was a remaining simulation artifact or a genuine, pre-existing bias in `estimate_games_played`
+itself, using the RAW (non-simulated) walk-forward residuals: `games_resid` (actual - games_est) by games_est
+bucket, is REAL: 0-8 bucket +0.86, 8-13 bucket -0.86, 13-15 bucket -1.70, 15-17 bucket -2.23 (2018-2025
+pooled, n=637-1340 per bucket) - a genuine, monotonic, statistically real regression-to-the-mean pattern, not
+a simulation bug. Fit a linear correction on calibration data (2018-2022): `games_resid = 2.515 - 0.305 *
+games_est` (r=-0.245, p=3.71e-31), then validated out-of-sample on 2023-2025: uncorrected mean resid -0.915,
+CORRECTED mean resid 0.121 (p=0.32, not significant - well-centered) - holds up genuinely out-of-sample, same
+calibrate/validate discipline as the original BOUNCE_BACK_INTERCEPT/SLOPE correction.
+
+**This is a real, statistically standard phenomenon (shrinkage/regression-to-the-mean for a bounded, noisy
+estimate)**: a player's OWN games_est reaching the top of the range partly reflects real durability AND partly
+reflects favorable noise in their recent trailing history - some of that noise doesn't repeat, so the true
+expected value regresses toward the population mean, a well-established statistical effect (the same logic
+behind James-Stein/empirical-Bayes shrinkage), not a fluke of this specific slice of data.
+
+**NOT shipped as a point-estimate correction yet - deliberately paused for a user decision rather than
+silently reshaping the whole board.** Unlike every other fix this session (each touching a specific,
+identifiable cohort - a role-upgrade QB, a backup, a returning-from-injury player), this pattern is GENERAL
+and would shift `games_est` down for EVERY high-durability player on the board by up to ~2.7 games at the
+extreme (games_est=17 -> ~14.3) - the single largest-magnitude, broadest-reaching correction found this
+entire project, re-ranking a large share of the board (Gibbs, Chase, Allen, and every other true workhorse),
+not a narrow edge case. Currently the SIMULATION correctly reflects this real variance/downside risk (that's
+its job), while the board's own point-estimate games_est/total_points_pred/VBD are UNCHANGED - flagged as an
+open, high-value, already-validated candidate fix for a future session, pending the user's explicit go-ahead
+given its scale.
+
+Regenerated both boards with the bucketing fix (740 rows each). `scripts/simulate_roster.py` verified end to
+end on a 10-player sample roster (Gibbs/Chase/Allen/St. Brown/McCaffrey/McBride/Lamb/C.Brown/Willis/Mendoza) -
+team season-total median ~2160, matching the corrected per-player numbers exactly (sum of player sim_means
+2154.9 vs. the roster function's own team_mean, consistent).
+

@@ -300,6 +300,15 @@ def main() -> None:
     sim = sim.dropna(subset=["player_id"])
     board = board.merge(sim, on="player_id", how="left")
 
+    # Cache the residual pools so scripts/simulate_roster.py (phase 2 - a
+    # specific drafted roster) can reuse the exact same walk-forward error
+    # distributions without re-deriving them from raw data.
+    residuals_path = OUTPUT_DIR / f"walk_forward_residuals_{args.scoring}.csv"
+    pd.concat(
+        [vet_residuals.assign(is_rookie=0), rookie_residuals.assign(is_rookie=1)], ignore_index=True
+    ).to_csv(residuals_path, index=False)
+    print(f"  wrote residual pool -> {residuals_path}")
+
     board = board.sort_values("vbd", ascending=False)
     board = board.round(2)
 

@@ -1543,9 +1543,9 @@ def compute_walk_forward_residuals(
         test["games_est"] = estimate_games_played(test["wavg_games_played"], test["prev_games_played"], test["position"])
         test["ppg_resid"] = test["ppg"] - test["ppg_pred"]
         test["games_resid"] = test["games_played"] - test["games_est"]
-        results.append(test[["player_id", "season", "position", "ppg_resid", "games_resid"]])
+        results.append(test[["player_id", "season", "position", "games_est", "ppg_resid", "games_resid"]])
     return pd.concat(results, ignore_index=True) if results else pd.DataFrame(
-        columns=["player_id", "season", "position", "ppg_resid", "games_resid"]
+        columns=["player_id", "season", "position", "games_est", "ppg_resid", "games_resid"]
     )
 
 
@@ -1576,10 +1576,115 @@ def compute_rookie_walk_forward_residuals(
         games_pred = (test["games_intercept"] + test["games_slope"] * log_pick).clip(lower=0, upper=17)
         test["ppg_resid"] = test["ppg"] - ppg_pred
         test["games_resid"] = test["games_played"] - games_pred
-        results.append(test[["player_id", "season", "position", "ppg_resid", "games_resid"]])
+        test["games_est"] = games_pred
+        results.append(test[["player_id", "season", "position", "games_est", "ppg_resid", "games_resid"]])
     return pd.concat(results, ignore_index=True) if results else pd.DataFrame(
-        columns=["player_id", "season", "position", "ppg_resid", "games_resid"]
+        columns=["player_id", "season", "position", "games_est", "ppg_resid", "games_resid"]
     )
+
+
+GAMES_EST_BUCKETS = [0, 8, 13, 15, 17.01]
+"""Bucket boundaries for conditioning a simulated games_resid draw on the
+target player's OWN games_est level, not just position - see
+_draw_simulated_totals's docstring for why this matters.
+"""
+
+
+def _draw_simulated_totals(
+    sub_board: pd.DataFrame,
+    vet_residuals: pd.DataFrame,
+    rookie_residuals: pd.DataFrame,
+    n_sims: int,
+    seed: int,
+    max_games: int = 17,
+) -> np.ndarray:
+    """Shared low-level Monte Carlo draw, used by both simulate_season_
+    outcomes (phase 1 - every player on the board) and
+    simulate_roster_outcomes (phase 2 - a specific drafted roster).
+
+    For each row of `sub_board`, draws n_sims (ppg_resid, games_resid) PAIRS
+    (same historical player-season, not sampled independently - see
+    compute_walk_forward_residuals) from the real historical error
+    distribution for players at the SAME position AND a similar games_est
+    LEVEL (GAMES_EST_BUCKETS), using vet_residuals for established players
+    and rookie_residuals for `is_rookie` rows. Adds each draw to the row's
+    own final ppg_pred/games_est, clips to realistic bounds (ppg >= 0, games
+    in [0, max_games]), and returns the resulting (n_players, n_sims) array
+    of simulated season totals, in the same row order as `sub_board`.
+
+    BUG FOUND AND FIXED while building phase 2 (roster simulation), 2026-
+    08-28: the first version pooled residuals by position only, ignoring
+    what the historical row's OWN games_est had been. Real games_played is
+    hard-bounded at [0, 17], so a historical row with a high games_est
+    (e.g. 16) has much less room to be UNDER-estimated (games_resid > 0,
+    clipped near the ceiling) than to be OVER-estimated (games_resid < 0,
+    plenty of room down to 0) - real, correct asymmetry for that specific
+    row. But applying that SAME pooled (asymmetric-at-the-high-end)
+    residual distribution to every player regardless of their own
+    games_est, then re-clipping again at 17, silently punished exactly the
+    players whose own games_est was ALREADY high (a real bell-cow, e.g.
+    Jahmyr Gibbs at 16.6) - re-clipping a second time truncates the upside
+    they didn't actually need much of anyway, while the low-games_est
+    residuals in the same pool get applied unclipped, dragging the
+    simulated MEAN below the calibrated point estimate. Caught via phase 2:
+    summing 10 stud-heavy roster players' simulated totals landed ~9% below
+    the naive sum of their own total_points_pred - a discrepancy that
+    should not exist if games_est is genuinely the calibrated MEAN (it is -
+    see estimate_games_played's own walk-forward validation). Quantified
+    directly: pooling-only games_resid produced a mean gap of -18.4 points
+    (-15.5%) for the games_est 15-16 bucket and +5.6 points (+326%, small
+    base) for the 5-10 bucket - a real, systematic, opposite-direction bias
+    at both ends, not noise. Fixed by bucketing the residual pool by the
+    historical row's OWN games_est (GAMES_EST_BUCKETS) before drawing, so a
+    16.6-games_est target player draws from historical rows that ALSO had
+    a similarly high games_est - the correct asymmetry (real, deserved) is
+    preserved without cross-contaminating from low-games_est rows whose
+    resampled residuals don't reflect the same real ceiling proximity.
+    """
+    rng = np.random.default_rng(seed)
+    ppg_pred = sub_board["ppg_pred"].to_numpy()
+    games_est = sub_board["games_est"].to_numpy()
+    is_rookie = sub_board["is_rookie"].fillna(0).to_numpy().astype(bool)
+    positions = sub_board["position"].to_numpy()
+    games_bucket = pd.cut(sub_board["games_est"], GAMES_EST_BUCKETS)
+    n_players = len(sub_board)
+    total_draws = np.zeros((n_players, n_sims))
+
+    vet_residuals = vet_residuals.assign(_bucket=pd.cut(vet_residuals["games_est"], GAMES_EST_BUCKETS))
+    rookie_residuals = rookie_residuals.assign(_bucket=pd.cut(rookie_residuals["games_est"], GAMES_EST_BUCKETS))
+
+    for position in pd.unique(positions):
+        for bucket in games_bucket.cat.categories:
+            row_mask = (positions == position) & (games_bucket == bucket).to_numpy()
+            if not row_mask.any():
+                continue
+            vet_pool = vet_residuals[(vet_residuals["position"] == position) & (vet_residuals["_bucket"] == bucket)]
+            rookie_pool = rookie_residuals[
+                (rookie_residuals["position"] == position) & (rookie_residuals["_bucket"] == bucket)
+            ]
+            # Fall back to the whole position (ignoring the games_est bucket)
+            # if a specific (position, bucket) cell is too sparse to trust -
+            # still far better than the pre-fix pooled-across-everything
+            # behavior, since it only falls back for the rare thin cell.
+            if len(vet_pool) < 20:
+                vet_pool = vet_residuals[vet_residuals["position"] == position]
+            if len(rookie_pool) < 20:
+                rookie_pool = rookie_residuals[rookie_residuals["position"] == position]
+
+            for role_mask, primary_pool, fallback_pool in (
+                (row_mask & is_rookie, rookie_pool, vet_pool),
+                (row_mask & ~is_rookie, vet_pool, rookie_pool),
+            ):
+                if not role_mask.any():
+                    continue
+                use_pool = primary_pool if not primary_pool.empty else fallback_pool
+                idx = rng.integers(0, len(use_pool), size=(role_mask.sum(), n_sims))
+                ppg_draws = np.clip(ppg_pred[role_mask][:, None] + use_pool["ppg_resid"].to_numpy()[idx], 0, None)
+                games_draws = np.clip(
+                    np.round(games_est[role_mask][:, None] + use_pool["games_resid"].to_numpy()[idx]), 0, max_games
+                )
+                total_draws[role_mask] = ppg_draws * games_draws
+    return total_draws
 
 
 def simulate_season_outcomes(
@@ -1595,16 +1700,6 @@ def simulate_season_outcomes(
     compute_rookie_outcome_range - this gives the whole board a real
     simulated distribution, not just two percentile numbers).
 
-    For each player, draws n_sims (ppg_resid, games_resid) pairs (see
-    compute_walk_forward_residuals) from real historical prediction errors
-    for their position - veterans draw from vet_residuals, rookies (board's
-    `is_rookie` flag) draw from rookie_residuals, since a true rookie's
-    real uncertainty is structurally different (higher-variance, no NFL
-    track record) from a veteran's. Adds each draw to the player's OWN
-    final ppg_pred/games_est (after every board-time correction), clips to
-    realistic bounds (ppg >= 0, games in [0, max_games]), and multiplies to
-    get a simulated season total.
-
     Reports the simulated distribution as percentiles (p10/p25/median/p75/
     p90 of total points) plus two derived, decision-relevant probabilities:
     - sim_bust_prob: P(simulated total < this position's replacement level)
@@ -1617,53 +1712,92 @@ def simulate_season_outcomes(
       this project has repeatedly validated over discounting for volatility
       (see the rejected risk-adjusted-VBD research).
     """
-    rng = np.random.default_rng(seed)
+    total_draws = _draw_simulated_totals(board, vet_residuals, rookie_residuals, n_sims, seed, max_games)
     replacement_by_pos = board.groupby("position")["replacement_points"].first()
     boom_by_pos = board.groupby("position")["total_points_pred"].apply(lambda s: s.nlargest(5).mean())
+    replacement_pts = board["position"].map(replacement_by_pos).fillna(0.0).to_numpy()[:, None]
+    boom_pts = board["position"].map(boom_by_pos).fillna(np.inf).to_numpy()[:, None]
 
-    summaries = []
-    for position, group in board.groupby("position"):
-        vet_pool = vet_residuals[vet_residuals["position"] == position]
-        rookie_pool = rookie_residuals[rookie_residuals["position"] == position]
-        if vet_pool.empty and rookie_pool.empty:
-            continue
+    return pd.DataFrame(
+        {
+            "player_id": board["player_id"].to_numpy(),
+            "sim_p10": np.percentile(total_draws, 10, axis=1),
+            "sim_p25": np.percentile(total_draws, 25, axis=1),
+            "sim_median": np.percentile(total_draws, 50, axis=1),
+            "sim_p75": np.percentile(total_draws, 75, axis=1),
+            "sim_p90": np.percentile(total_draws, 90, axis=1),
+            "sim_bust_prob": (total_draws < replacement_pts).mean(axis=1),
+            "sim_boom_prob": (total_draws >= boom_pts).mean(axis=1),
+        }
+    )
 
-        ppg_pred = group["ppg_pred"].to_numpy()
-        games_est = group["games_est"].to_numpy()
-        is_rookie = group["is_rookie"].fillna(0).to_numpy().astype(bool)
-        n_players = len(group)
 
-        ppg_draws = np.zeros((n_players, n_sims))
-        games_draws = np.zeros((n_players, n_sims))
-        for mask, pool in [(is_rookie, rookie_pool), (~is_rookie, vet_pool)]:
-            if not mask.any():
-                continue
-            use_pool = pool if not pool.empty else (rookie_pool if pool is vet_pool else vet_pool)
-            idx = rng.integers(0, len(use_pool), size=(mask.sum(), n_sims))
-            ppg_draws[mask] = ppg_pred[mask][:, None] + use_pool["ppg_resid"].to_numpy()[idx]
-            games_draws[mask] = games_est[mask][:, None] + use_pool["games_resid"].to_numpy()[idx]
+def simulate_roster_outcomes(
+    roster_board: pd.DataFrame,
+    vet_residuals: pd.DataFrame,
+    rookie_residuals: pd.DataFrame,
+    n_sims: int = 2000,
+    seed: int = 42,
+    max_games: int = 17,
+) -> dict:
+    """Monte Carlo simulation for a full drafted fantasy ROSTER's season-
+    total outcome distribution - phase 2 of this project's simulation work
+    (see simulate_season_outcomes for phase 1, per-player).
 
-        ppg_draws = np.clip(ppg_draws, 0, None)
-        games_draws = np.clip(np.round(games_draws), 0, max_games)
-        total_draws = ppg_draws * games_draws
+    The real value over just reading each player's own phase-1 percentiles
+    off the board: this SUMS each simulation draw ACROSS the roster (same
+    simulated universe, same draw index) rather than combining separately-
+    computed per-player percentiles, which would be statistically wrong -
+    P10 + P10 is not the P10 of a sum. This answers "how does MY team's
+    total season output vary," not just "how does each player individually
+    vary."
 
-        replacement_pts = replacement_by_pos.get(position, 0.0)
-        boom_pts = boom_by_pos.get(position, np.inf)
-        summaries.append(
-            pd.DataFrame(
-                {
-                    "player_id": group["player_id"].to_numpy(),
-                    "sim_p10": np.percentile(total_draws, 10, axis=1),
-                    "sim_p25": np.percentile(total_draws, 25, axis=1),
-                    "sim_median": np.percentile(total_draws, 50, axis=1),
-                    "sim_p75": np.percentile(total_draws, 75, axis=1),
-                    "sim_p90": np.percentile(total_draws, 90, axis=1),
-                    "sim_bust_prob": (total_draws < replacement_pts).mean(axis=1),
-                    "sim_boom_prob": (total_draws >= boom_pts).mean(axis=1),
-                }
-            )
-        )
-    return pd.concat(summaries, ignore_index=True) if summaries else pd.DataFrame()
+    Deliberately does NOT model cross-player correlation (a bad QB week
+    dragging his own receivers down together, an injury dynamically opening
+    up a teammate's workload - the vacated_opportunity signal this pipeline
+    already computes historically, but not simulated dynamically here) -
+    that's phase 3, scoped but not built (see CLAUDE.md). Treating each
+    roster player's simulated outcome as independent likely UNDERSTATES the
+    roster's true variance somewhat, since within-team correlations in the
+    real NFL trend positive far more often than negative - read this as a
+    reasonable FLOOR on team-level uncertainty, not the final word.
+
+    `roster_board` is the subset of the full board for exactly the drafted
+    roster (needs player_display_name/position/ppg_pred/games_est/
+    is_rookie, same as simulate_season_outcomes).
+
+    Returns a dict:
+    - `team_totals`: the raw (n_sims,) array of simulated team season
+      totals, for further analysis or plotting.
+    - `summary`: team-level percentiles (p10/p25/median/p75/p90/mean).
+    - `player_detail`: each player's own simulated contribution (mean/p10/
+      median/p90), so a user can see which roster spots are driving the
+      team's own variance, not just the aggregate number.
+    """
+    total_draws = _draw_simulated_totals(roster_board, vet_residuals, rookie_residuals, n_sims, seed, max_games)
+    team_totals = total_draws.sum(axis=0)
+
+    player_detail = pd.DataFrame(
+        {
+            "player_display_name": roster_board["player_display_name"].to_numpy(),
+            "position": roster_board["position"].to_numpy(),
+            "sim_mean": total_draws.mean(axis=1),
+            "sim_p10": np.percentile(total_draws, 10, axis=1),
+            "sim_median": np.percentile(total_draws, 50, axis=1),
+            "sim_p90": np.percentile(total_draws, 90, axis=1),
+        }
+    ).sort_values("sim_mean", ascending=False)
+
+    summary = {
+        "n_players": len(roster_board),
+        "team_mean": float(team_totals.mean()),
+        "team_p10": float(np.percentile(team_totals, 10)),
+        "team_p25": float(np.percentile(team_totals, 25)),
+        "team_median": float(np.percentile(team_totals, 50)),
+        "team_p75": float(np.percentile(team_totals, 75)),
+        "team_p90": float(np.percentile(team_totals, 90)),
+    }
+    return {"team_totals": team_totals, "summary": summary, "player_detail": player_detail}
 
 
 # Sleeper and nflverse otherwise agree on team codes, but use different
