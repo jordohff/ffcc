@@ -2534,3 +2534,82 @@ end on a 10-player sample roster (Gibbs/Chase/Allen/St. Brown/McCaffrey/McBride/
 team season-total median ~2160, matching the corrected per-player numbers exactly (sum of player sim_means
 2154.9 vs. the roster function's own team_mean, consistent).
 
+
+
+### 2026-08-28 - durability shrinkage correction: previewed, real, but rejected (rookie/veteran inconsistency)
+
+User asked to see the general durability-shrinkage correction (from the phase-2 entry above) actually applied
+to the board before deciding whether to ship it - regenerated with `GAMES_SHRINKAGE` wired into
+`estimate_games_played` (position-specific: QB -0.186, RB -0.332, WR -0.359, TE -0.313 slope on games_est,
+refit on the full 2018-2025 pool after the calibrate/validate split already documented above).
+
+**Confirmed the correction is real** (backtest was flat-to-slightly-better across all four positions: RB
+0.779->0.788, TE 0.807->0.810, WR 0.805->0.811, QB 0.734->0.730), but the PREVIEW surfaced a real problem not
+caught by the backtest alone: this correction only applies to the VETERAN path (`estimate_games_played`) -
+rookies get games_est from a completely separate mechanism (the pick curve) that was never checked for the
+same pattern. Checked directly: rookies show NO significant shrinkage pattern at any position (p=0.59-0.95
+across QB/RB/WR/TE) - a genuine, mechanistic difference (a rookie's estimate comes from OTHER players' pick-
+slot history, not their own trailing hot streak, so there's no "got lucky recently" effect to regress away).
+
+That's a real, tested difference, not an oversight - but shipping the veteran-only correction as-is produced
+a lopsided board: every proven veteran workhorse dropped (Gibbs 308->258 total points, #1->#2 overall; Bijan
+306->255, #2->#3) while every rookie stayed exactly where they were, so unproven rookies leapfrogged
+established players purely from asymmetric treatment, not real relative improvement (Jeremiyah Love #9->#1
+overall, Carnell Tate #25->#8, both with 0.0 games_est change). **Reverted** (`git checkout` on season.py,
+regenerated both boards back to the pre-correction state) rather than ship a result that trades one real bias
+for a worse, more visible one. The underlying veteran-side finding remains real and documented above as a
+validated, ready-to-revisit candidate - just not shippable alone without also resolving the rookie side.
+
+
+
+### 2026-08-28 - rookie games curve ceiling: real artifact confirmed, statistically-correct fix tested and also rejected; team-touch-concentration hypothesis (4th crowding test) also rejected
+
+Follow-up on the Jeremiyah Love investigation, specifically the user's concern about a crowded Arizona
+backfield (Tyler Allgeier, James Conner) suppressing his workload despite being RB1 on paper.
+
+**Confirmed a real mechanical artifact in the rookie games curve**: the raw (uncapped) log-linear fit for RB
+predicts 23.17 games at pick 1, decaying only to 16.91 by pick 8 - every real pick 1-7 selection silently
+collides with the `clip(upper=17)` ceiling and gets flattened to an IDENTICAL games_est=17.0, with zero
+differentiation between a true #1-overall selection and the last pick of that same top tier. Checked the real
+comps: only 5 RBs have ever been drafted picks 1-7 in this dataset (2010-2025) - Barkley (16 games),
+Richardson (15), Elliott (15), Fournette (13), Jeanty (17) - mean 15.2, meaningfully below the flat-capped 17.
+
+**Tried the statistically correct fix (a logit-bounded curve, naturally incapable of exceeding 17) and it
+does NOT hold up.** Fit `logit(games_played/17) ~ a + b*log(pick)` instead of raw linear+clip - this
+correctly differentiates every pick (RB pick 1: 16.85 vs pick 8: 15.89, a real gradient instead of a flat
+line) and moves Love (pick 3) from 17.00 -> 16.57. But walk-forward validated (fit on classes before test_
+season, evaluate on test_season, RB only, 2015-2025): MAE 4.71 (logit) vs. 4.56 (current linear+clip) - the
+"more correct" functional form is measurably WORSE at real prediction, not better. Root cause: with only 5
+real data points ever at picks 1-7, there's no way to fit a meaningfully different, validated shape there
+without trading off accuracy in the bulk of the (much larger, mid/late-round) sample the curve also has to
+fit. **Not shipped** - matches this project's standing rule that "more principled-looking" isn't the bar,
+"actually more accurate" is (same discipline as the routes x YPRR rejection).
+
+**Tested a 4th, genuinely new crowding-adjacent hypothesis (distinct from the three already rejected in the
+2026-08-13 entry): does a TEAM's own historical tendency to concentrate or split RB touches (independent of
+the specific players on the roster) predict a highly-drafted rookie's outcome?** Built `top1_share` (the
+team's leading RB's share of that team's total RB touches, per team-season, REG only) as a lagged (prior-
+season) team-context feature and walk-forward tested against rookie RB ppg/games residuals: pooled corr
+-0.063/p=0.34 (ppg) and 0.025/p=0.70 (games); restricted to early picks (<=100) specifically, still null
+(p=0.29/0.41, n=70). A clean, real null result - a team's own recent touch-splitting PHILOSOPHY does not
+reliably predict how a highly-drafted rookie's workload plays out, joining the three already-rejected
+hypotheses. Plausible read (consistent with why all four crowding-style tests have failed): genuine top-tier
+talent tends to earn a real workload regardless of a team's recent committee habits or existing personnel -
+real talent asserts itself past historical team tendencies more often than not.
+
+**Arizona's own real context, reported honestly as informative but NOT a fittable correction**: 2021-2024
+Arizona ran a fairly typical touch split (0.53-0.62 top-RB share, close to the league median 0.56), but 2025
+was notably lower (0.33) - a real, recent committee approach with the existing Conner/Allgeier group. This is
+a real, concrete fact worth knowing, and matches the user's stated intuition - but the league-wide test above
+found this kind of signal doesn't reliably predict a rookie's OWN outcome, so it is not incorporated as a
+point-estimate adjustment for Love specifically, consistent with this project's discipline against fitting a
+correction to one named player's situation without general statistical support (see also the McCaffrey
+old-injury pattern and the age x elite interaction, both rejected for the same reason).
+
+**Net conclusion, reported directly rather than defended past the evidence**: neither the ceiling artifact fix
+nor a 4th crowding hypothesis produced a shippable improvement to Love's point estimate or games_est. His
+current board numbers (ppg_pred 15.12, games_est 17.0, sim_p10 143.0/median 238.8/p90 342.6, bust_prob 13%)
+stand as the most defensible number this pipeline can currently produce - a real, historically-grounded
+top-tier-RB downside range, not a claim that Arizona-specific risk is fully modeled. No code shipped from
+this investigation.
+
