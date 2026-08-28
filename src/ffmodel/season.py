@@ -1498,6 +1498,85 @@ def estimate_games_played(
     return (games_est + correction).clip(upper=max_games)
 
 
+ELITE_Z_THRESHOLD = 1.0
+ELITE_RECENT_MISSED_TIME_THRESHOLD = 14
+ELITE_RECENT_INJURY_GAMES_BOOST = 1.24
+"""Additive games_est correction for players who are BOTH elite (top ~16%
+of their position by recency-weighted rate, wavg_ppg z-scored within
+position/season) AND recently missed some time (prev_games_played < 14) -
+see apply_elite_recent_injury_durability_boost's docstring for the full
+investigation (2026-08-28).
+"""
+
+
+def apply_elite_recent_injury_durability_boost(board: pd.DataFrame) -> pd.DataFrame:
+    """Add ELITE_RECENT_INJURY_GAMES_BOOST games to games_est for players
+    who are both elite (top ~16% of their position by wavg_ppg, z-scored
+    within position/season) and coming off a recently shortened season
+    (prev_games_played < 14) - a real, validated bias distinct from every
+    other durability correction in this pipeline.
+
+    Found 2026-08-28, investigating why Patrick Mahomes (durability side)
+    and Joe Burrow (durability + rate) ranked so far below their real
+    talent level, and the user's broader question: are two SEPARATELY
+    validated, individually-unbiased corrections (Ridge rate-shrinkage for
+    elite/unusual profiles, and the durability discount machinery)
+    compounding unfairly for players who land in BOTH populations at once?
+
+    Tested directly with an interaction regression (`games_resid ~
+    is_elite + recent_missed_time + is_elite*recent_missed_time`, walk-
+    forward, all positions pooled with position-standardized elite_z,
+    2018-2025, n=3513): the interaction term is real and significant
+    (coef +0.90, p=0.039). Group means make the shape clear - EVERY OTHER
+    combination of (elite, recently-missed-time) is at or below zero
+    (non-elite/healthy: -2.00; non-elite/missed-time: -0.40; elite/healthy:
+    -1.26 - even healthy elite players see some of the general durability
+    shrinkage already documented and reverted elsewhere) - but elite AND
+    recently-missed-time is the one cell that flips POSITIVE: +1.25 games,
+    n=176. Calibrated on 2018-2022 (mean +0.92, p=0.021), validated
+    out-of-sample on 2023-2025 (mean +1.77, p=0.0009) - the effect held up
+    AND grew out of sample, not shrank toward noise, a strong signal this
+    is real rather than a calibration-period fluke. Final constant (1.24)
+    is the full 2018-2025 pooled mean.
+
+    Real, intuitive mechanism: a true elite player missing some time is
+    more likely a real, explainable, one-off event (they keep their job
+    unquestioned, get real medical/support resources, aren't at risk of
+    a role change on top of the injury) - unlike a similar absence for a
+    replacement-level player, which more often reflects BOTH a real injury
+    AND underlying precariousness (losing snaps/role on top of the
+    injury) that compounds against them. This is the opposite direction
+    from, and a genuinely different population than, the general
+    durability-shrinkage finding (2026-08-28, tested and reverted for its
+    own rookie/veteran inconsistency) - that one showed high-games_est
+    players get OVER-estimated on average; this one is specifically about
+    the elite-AND-recently-hurt intersection being UNDER-estimated.
+
+    Directly answers the user's compounding-bias question: yes, for this
+    specific intersection, two individually-unbiased-on-average
+    corrections DO combine into a real, extra bias beyond what either
+    predicts alone - and it's now fixed with real, validated evidence,
+    not by hand-tuning one named player's number.
+
+    Uses wavg_ppg (already computed for every veteran prediction row, NOT
+    available for rookies - correctly a no-op for them, matching every
+    other veteran-only durability correction in this pipeline) and
+    prev_games_played, gating on the CURRENT prediction cohort's own
+    position/season distribution for elite_z, so it naturally recomputes
+    correctly every time the board is rebuilt.
+    """
+    board = board.copy()
+    elite_z = board.groupby("position")["wavg_ppg"].transform(lambda s: (s - s.mean()) / s.std())
+    is_elite = elite_z >= ELITE_Z_THRESHOLD
+    recent_missed_time = board["prev_games_played"] < ELITE_RECENT_MISSED_TIME_THRESHOLD
+    boosted = (is_elite & recent_missed_time).fillna(False)
+    board.loc[boosted, "games_est"] = (board.loc[boosted, "games_est"] + ELITE_RECENT_INJURY_GAMES_BOOST).clip(
+        upper=17
+    )
+    board["total_points_pred"] = board["ppg_pred"] * board["games_est"]
+    return board
+
+
 def compute_walk_forward_residuals(
     training_table: pd.DataFrame, start_season: int = 2018, end_season: int = 2026
 ) -> pd.DataFrame:

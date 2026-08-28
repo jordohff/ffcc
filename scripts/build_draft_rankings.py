@@ -29,6 +29,7 @@ from ffmodel.season import (
     add_prior_starter_season_flag,
     add_recent_injury_history_flag,
     apply_current_team_from_sleeper,
+    apply_elite_recent_injury_durability_boost,
     apply_qb_backup_games_est,
     apply_qb_role_upgrade_boost,
     apply_qb_starter_floor,
@@ -163,6 +164,7 @@ def main() -> None:
         vet_board["wavg_games_played"], vet_board["prev_games_played"], vet_board["position"]
     )
     vet_board["total_points_pred"] = vet_board["ppg_pred"] * vet_board["games_est"]
+    vet_board = apply_elite_recent_injury_durability_boost(vet_board)
     vet_board = vet_board[
         ["player_id", "player_display_name", "position", "team", "age", "team_changed",
          "new_head_coach", "new_hc_prior_team_ppg", "prev_snap_share_trend", "prev_snap_share_level",

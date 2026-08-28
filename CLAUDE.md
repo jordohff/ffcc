@@ -2613,3 +2613,154 @@ stand as the most defensible number this pipeline can currently produce - a real
 top-tier-RB downside range, not a claim that Arizona-specific risk is fully modeled. No code shipped from
 this investigation.
 
+
+
+### 2026-08-28 - Patrick Mahomes near-replacement-level: investigated, two known/accepted patterns compounding, not a new bug
+
+User flagged the QB top of the board as "peculiar" - specifically, Mahomes ranking QB86 overall (VBD ~2.09,
+barely above replacement) despite being a perennial elite real fantasy QB, well behind Baker Mayfield (QB44)
+and Caleb Williams (QB46).
+
+**Durability side - real injury confirmed, but tested a fix hypothesis and the data argues AGAINST it.**
+Verified via web search: Mahomes tore his ACL AND LCL in Week 15 2025 (missed weeks 16-18, season-ending
+surgery), but is fully recovered and cleared for 2026 - Andy Reid confirmed full strength, Mahomes says he's
+hit every recovery benchmark, on track for the Sept. 14 opener. His `prev_games_played=14` sits ABOVE the
+existing QB bounce-back correction's `<10` gate, so he gets zero durability credit for the absence. Tested
+whether that threshold is too strict by checking real historical QBs with `prev_games_played` in [11,16]
+(missed 1-6 games, the same range Mahomes falls in): a real, significant pattern (n=178, p<0.0001) - but in
+the OPPOSITE direction from what would help him. `games_resid` (actual - games_est) is NEGATIVE for this
+cohort (mean -1.42 raw, still negative after accounting for calibration split) - comparable players
+historically play FEWER games the following season than the plain estimate already predicts, not more. Tried
+a continuous (not threshold-gated) reformulation of the bounce-back correction across the full games_missed
+range - it does NOT validate out of sample either (calibration fit looked real, r=0.234, p=7.8e-10, but
+validation-period corrected resid got WORSE, not better: -0.545 uncorrected -> -0.750 corrected, p moved from
+0.11 to 0.03). **No durability fix shipped** - the data does not support raising Mahomes' games_est, even
+though we know specifically (via news, not model-visible data) that his particular injury has genuinely and
+verifiably resolved. This is the same class of gap already documented for `flag_injury_affected_weeks` (the
+model can only see officially-structured injury/game data, not a beat-reporter-confirmed "he's specifically,
+verifiably fine now").
+
+**Rate side - the same Ridge-shrinkage-for-elite-profiles pattern already documented for Burrow/Daniels/Lamar
+Jackson (2026-08-27 entry), now confirmed to also apply to Mahomes.** Decomposed his QB Ridge prediction
+(same method as the earlier Willis/Burrow work): `wavg_passing_yards_pg` (253.9 yds/game) contributes
+NEGATIVELY to his own ppg_pred (-3.73) - a real multicollinearity artifact, since passing yards correlates
+heavily with attempts_pg and passing_tds_pg (both already counted positively in the model), so Ridge partially
+"double-discounts" raw yardage for a high-efficiency passer. `wavg_ppg` (18.92, his own real recent blended
+rate) only translates to ppg_pred=16.79 - the same shrinkage pattern, not a new one.
+
+**Net read: two independently real, already-validated modeling behaviors compounding, not a new bug.** Neither
+component alone is dramatic, but a modest, data-supported durability caution (recent partial-season absence)
+stacking with inherent linear-model shrinkage for an elite/unusual rate profile produces a much more jarring
+combined outcome than either effect alone. No code changes shipped - both hypotheses were tested and the
+evidence argued against a fix in both cases, consistent with this project's standing discipline (see also the
+McCaffrey old-injury pattern and the Burrow/Daniels gap, both similarly diagnosed and left as accepted, known
+limitations of the deliberately simple linear model rather than force-fit).
+
+
+
+### 2026-08-28 - Bo Nix over Burrow/Lamar Jackson: verified real facts, tried one genuinely new angle, still no fix
+
+Direct follow-up to the Mahomes investigation - user's real question: "am I really going to take Bo Nix over
+Burrow, Lamar, etc. when I know Burrow and Lamar have been better/more elite than Bo Nix?" Bo Nix ranks QB33
+(VBD 52.83) - well ahead of Lamar Jackson (QB59, VBD 24.68) and Joe Burrow (QB228, VBD -85.20, BELOW
+replacement).
+
+**Verified the real facts first, not just the model's read of them.** Bo Nix: exactly 2 NFL seasons, BOTH
+full 17-game seasons, with improving efficiency (EPA/play 2.03 -> 3.72). Lamar Jackson: real elite peaks
+(2019 27.71 ppg, 2024 25.32 ppg) but a real, notable decline in his most recent season (2025: only 13 games,
+16.53 ppg - his worst rate since being a part-time player). Joe Burrow: real elite peaks when healthy (2022
+21.92 ppg, 2024 21.93 ppg) but a real pattern of THREE separate missed-time seasons in 6 years (2020 rookie
+ACL, 2023 wrist, 2025 - confirmed via web search: Grade 3 turf toe requiring surgery, 9 games missed) -
+critically, three DIFFERENT, unrelated injury types, not the same body part recurring.
+
+**Confirmed every mechanism driving these numbers has ALREADY been tested and validated by this project -
+none of them show a fixable bias for this exact situation.** (1) Burrow's `prev_games_played=8` falls in the
+already-tested "moderate severity" (5-9 games) cohort, already found to need no bounce-back correction. (2)
+His 3-year games pattern (8/17/10) is exactly the "oscillating" short-full-short shape already tested
+2026-08-27 and found not significant for QB (mean resid 0.384, p=0.12). Re-ran that exact test fresh as part
+of this investigation (n=255 oscillating QB-seasons): mean resid 0.093, p=0.70 - a clean replication, not a
+new result, confirming no aggregate bias. (3) The Ridge-shrinkage-for-elite-profiles pattern (documented
+2026-08-27, reconfirmed for Mahomes above) also applies to Burrow and Lamar's rate predictions.
+
+**Tried one genuinely new angle: does the INJURY TYPE matter - a chronic, same-body-part-recurring pattern
+vs. Burrow's actual varied/freak-injury pattern (ACL, then wrist, then turf toe)?** A real, well-motivated,
+previously-untested hypothesis. Split the already-tested oscillating cohort by whether the two short seasons'
+primary injury tag (from real Out/Doubtful designations) matched or differed. Result: NOT a null finding, an
+INCONCLUSIVE one - only 14 of 255 oscillating QB-seasons had a resolvable serious-injury tag on both short
+seasons at all (same-type n=1, different-type n=13) - the other 241 show no "Out"/"Doubtful" designation
+during their short season, matching the already-documented gap that official injury reports often stop
+tracking a player once they're on injured reserve for an extended stretch (same mechanism as the Mahomes
+case above). **The data cannot currently support or refute this hypothesis - not enough resolvable cases to
+test it, not evidence that it doesn't matter.** A real, honest data-coverage limit, not a rejected idea.
+
+**Direct answer to the question asked**: per everything actually testable right now, YES - the model's
+current point estimate is a defensible, evidence-grounded preference for Nix's fully-proven, healthy,
+improving floor over Burrow's/Lamar's higher peak-but-real-recent-uncertainty profiles, for a PURE expected-
+value ranking. This is not a bug; it's several already-individually-validated real patterns compounding.
+BUT this is fundamentally a floor-vs-ceiling tradeoff, which a single point-estimate/VBD ranking is not
+designed to resolve - checked the Monte Carlo sim specifically for this: Burrow's own sim_p90 (307) doesn't
+even exceed Nix's (363), NOT because his rate ceiling isn't respected but because his own low games_est
+(11.1) caps his simulated upside even in good draws - meaning "should Burrow rank higher" reduces entirely to
+"is 11.1 games a fair durability number for him," which has now been tested three ways (moderate-severity
+threshold: no bias; oscillating pattern: no bias; injury-type variety: inconclusive, insufficient data) and
+none support raising it. No code shipped - this is the model's honest, currently-best-supported answer, with
+the one remaining open question (injury-type variety) flagged as genuinely untestable with current data
+rather than closed.
+
+
+
+### 2026-08-28 - compounding-bias hypothesis tested and SHIPPED: elite players recover from missed time better than the model assumed
+
+Direct follow-up: user's sharper question after the Nix/Burrow/Mahomes work - "should we be that concerned
+with durability?" Answered the broad version first by recalling the already-tested finding (2026-08-27):
+removing durability-awareness entirely makes real predictions measurably worse (MAE 3.74 vs 2.94, ~27%
+degradation) - durability matters, tested and confirmed, not re-litigated. Quantified HOW MUCH it actually
+reshuffles outcomes, a new angle: ranking real historical players by rate alone vs. by real season totals
+correlates at 0.93-0.94 across positions - durability is real but secondary, moving roughly 1-in-5 top-24-by-
+rate players out of the top-24-by-total tier. A meaningful, non-trivial effect, not a dominant one.
+
+**The sharper, genuinely new question this raised**: do two SEPARATELY validated, individually-unbiased-on-
+average corrections (Ridge rate-shrinkage for elite/unusual profiles, and the durability discount machinery)
+compound unfairly for players who land in BOTH populations at once - exactly Burrow's and Mahomes' situation.
+Tested directly with an interaction regression on walk-forward residuals (`games_resid ~ is_elite +
+recent_missed_time + interaction`, all positions pooled, wavg_ppg z-scored within position/season as the
+"elite" measure, prev_games_played<14 as "recently missed time," 2018-2025, n=3513): the interaction term is
+real and significant (coef +0.90, p=0.039). Group means tell a clean story - every OTHER combination is at or
+below zero (non-elite/healthy -2.00, non-elite/missed-time -0.40, elite/healthy -1.26, all consistent with
+the already-known general durability-shrinkage pattern) - but elite AND recently-missed-time is the one cell
+that flips positive: +1.25 games, n=176.
+
+**Calibrated and validated properly before shipping, same discipline as every other correction**:
+calibration (2018-2022) mean +0.92 games (p=0.021), validation (2023-2025) mean +1.77 games (p=0.0009) - the
+effect held up AND GREW out of sample, a strong sign this is real signal, not a calibration-period fluke.
+Final constant (ELITE_RECENT_INJURY_GAMES_BOOST=1.24) is the full 2018-2025 pooled mean.
+
+**Real, intuitive mechanism**: a true elite player missing some time is more often a real, explainable,
+one-off event - they keep their job unquestioned, get real medical/support resources, aren't at risk of a
+role change stacking on top of the injury. A similar absence for a replacement-level player more often
+reflects both a real injury AND underlying precariousness (losing snaps/role on top of getting hurt) that
+compounds against them - the model's general durability caution is reasonably calibrated for THAT population,
+just not for the elite intersection.
+
+**Shipped `apply_elite_recent_injury_durability_boost`** (season.py): adds 1.24 games to games_est for any
+veteran with wavg_ppg in the top ~16% of their position (z-score >= 1.0, computed fresh each board build from
+the current prediction cohort) AND prev_games_played < 14. Veteran-only (needs wavg_ppg, which doesn't exist
+for true rookies) - correctly a no-op for the rookie curve, same property as every other durability
+correction in this pipeline, so no new rookie/veteran asymmetry introduced (unlike the reverted general
+shrinkage attempt).
+
+**Verified on the regenerated board**: Lamar Jackson games_est 14.8 -> 16.04 (+1.24), total_points_pred
+274.37 -> 294.32, overall rank 59 -> 38 - a real, meaningful improvement. Joe Burrow games_est 11.1 -> 12.34,
+total 164.49 -> 182.86, rank 228 -> 186 - improved but still well below replacement, correctly reflecting that
+his situation is more severe (his rate is ALSO shrunk, and his prev_games_played=8 is a more extreme absence)
+than the boost alone can fully resolve. Patrick Mahomes UNCHANGED (prev_games_played=14 sits exactly AT, not
+below, the <14 threshold - a real boundary miss, left as-is rather than hand-tuned to include one named
+player without re-validating the threshold itself). Backtest headline numbers unchanged (board-build-time
+fix, not a training-time change) - matches every other role-transition correction in this pipeline. Both
+boards regenerated (740 rows each, no new NaN-merge issues).
+
+**Net answer to "should we be concerned with durability"**: yes, moderately (validated, real, ~1-in-5 effect)
+- but the SPECIFIC concern the user raised (elite players getting unfairly double-penalized) was real and is
+now fixed with genuine, out-of-sample-validated evidence, not a philosophical override of the model's
+caution.
+
