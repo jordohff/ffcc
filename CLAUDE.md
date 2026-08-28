@@ -2104,3 +2104,97 @@ role-upgrade replacement, the starter-season exclusion applied to both role-upgr
 rank ~648/total_points_pred~54 to rank 297/total_points_pred~146.5 - a real, defensible, evidence-driven
 result, not a name-targeted patch.
 
+
+
+### 2026-08-27 Ã¢â‚¬â€ team PPG consistency check built (real, validated signal) - caught a major structural bug: 42 active players missing from the board entirely
+
+User asked to look at several open threads together, including a new idea: check whether a team's QB output is
+internally consistent with that team's combined RB/WR/TE output (if a QB isn't producing enough, the skill
+positions shouldn't be either, since they draw from the same offensive pie).
+
+**Built and validated the consistency check itself.** Real, significant historical relationship between a
+team's QB1 PPG and that team's combined RB/WR/TE PPG (r=0.444, p=4e-26; total-points version even stronger,
+r=0.642, p=1e-60, n=512 team-seasons 2010-2025). Normal ratio (skill_ppg_sum / qb1_ppg) 5th-95th percentile:
+4.06-8.39. Applied to the current 2026 board and found 3 real outliers: GB, NO, CLE.
+
+**GB and NO turned out to be legitimate personnel situations** (GB has a genuinely spread-out WR corps with no
+alpha WR1 despite a good QB in Jordan Love; NO has a modest sophomore QB - Tyler Shough - behind a genuinely
+solid supporting cast) - not bugs, no action taken.
+
+**CLE broke the diagnostic open into a much bigger finding.** The consistency check flagged CLE (ratio 9.31,
+most extreme of the three) - investigating found CLE had NO QB at depth_chart_rank==1 in our data at all
+(Gabriel/Sanders/Green sat at ranks 2/3/4). The real rank-1 QB, per our own (correctly current, Aug 9)
+depth-chart pull, is Deshaun Watson - verified via a live news check that Watson was JUST confirmed (Aug 24) as
+CLE's real Week 1 2026 starter, beating out Shedeur Sanders in a real camp competition, after missing the
+ENTIRE 2025 season with a second Achilles tear. Watson was completely ABSENT from our board - not floored, not
+discounted, structurally invisible - because `build_prediction_features` only ever looks at
+season_stats[target_season - 1], and a player with zero games that season has no row there at all.
+
+**Checked the scope before fixing (matching this project's established practice)**: 42 real, currently-ACTIVE
+2026 roster players are missing from the board this same way. Most are irrelevant deep-bench names who'd be
+correctly near-worthless even if included (practice-squad-caliber players), but several are real, board-
+relevant misses: Deshaun Watson (CLE QB1), Will Levis (TEN), Tank Dell (HOU WR), Jonathon Brooks (CAR RB).
+
+**Validated the fix population before shipping it, not just patched blind.** The RAW "missed a season, had real
+games before" cohort (2012-2025, unconditioned) is dominated (90%) by players whose careers had simply ended
+(mean 0.59 games in their return season) - not comparable to Watson at all. Conditioned the SAME way as every
+other role-transition check this session (current depth_chart_rank==1, from the contemporaneous week-1/2
+snapshot): a completely different, healthy population - mean 11.55 games played, median 14 (n=44, 2012-2025).
+Close enough to the already-validated 1-7-games-missed role-upgrade cohort's own QB-healthy constant (11.00
+games) that it's reasonably the SAME underlying phenomenon (a current starter with little-to-no recent
+track record), not a population needing its own separate calibration.
+
+**Shipped**: `find_players_returning_from_lost_season` (season.py) - finds players with no season_stats row
+for target_season-1 but real games in target_season-2 or -3, AND on an ACTIVE target_season roster (rules out
+retired/out-of-league players). Wired into `build_prediction_features` only (the PREDICTION path) - deliberately
+NOT extended to `build_season_training_table` (the model-FITTING path), since the Ridge model's own accuracy
+isn't where this population's real value comes from (the board-build-time role-upgrade replacement functions
+already handle it correctly once these players get a row at all) and training on this rare, thin-signal
+population risked destabilizing coefficients for the much larger normal population.
+
+**Verified end to end**: Watson now appears with ppg_pred=14.54, games_est=9.75 (exactly matching the already-
+validated QB "had_real_injury" role-upgrade constant - correctly picked up automatically via the existing
+machinery once he had a row to work with, no new calibration needed), total_points_pred=141.78. CLE's team-
+consistency ratio moved from 9.31 (extreme outlier) to 4.65 (squarely normal) - direct confirmation the fix
+resolved the actual anomaly the diagnostic flagged, not just a coincidental side effect. "Fitting final veteran
+model" log line grew from 608 to 663 returning players projected; board grew from 685 to 740 total rows.
+
+**Secondary observation, not chased further this round**: after the fix, several elite/rushing-heavy QB teams
+(BUF/Allen, KC/Mahomes-tier, BAL, JAX, NE, LAC, GB) now cluster just below the historical normal ratio range
+(3.4-4.0 vs the 4.06 floor) - plausibly a real, modern trend (QB rushing production has grown league-wide since
+the 2010-2025 baseline was set, letting elite dual-threat QBs "keep" more value via their own legs rather than
+funneling it through WR/RB/TE), not obviously a bug. Flagged for a possible future look, not investigated
+further given the CLE case was the clear, actionable finding this round.
+
+Also surfaced, not yet investigated: Will Levis (TEN, depth_chart_rank==3, a clear backup) still shows a
+fairly high games_est (13.03) - likely because QB currently has no role_security_discount equivalent for
+backups (the earlier FantasyPros check found zero QB mismatches in the top 200 and concluded nothing needed
+fixing there) - worth revisiting now that backup QBs with a real PRIOR starter track record are more visible
+on the board via this session's fixes.
+
+
+
+### 2026-08-27 Ã¢â‚¬â€ on-demand live-data refresh workflow built and run for real
+
+Added `--refresh-live` to `scripts/pull_data.py`: re-fetches only the 4 sources that actually change
+during a live season (sleeper_players, current_depth_chart, rosters, injuries), skipping the 8 static
+historical-only pulls. Documented the full on-demand refresh workflow as a project skill,
+`.claude/skills/refresh-board/SKILL.md` (snapshot the board, refresh live data, regenerate both boards,
+diff against the snapshot, re-run the team-PPG-consistency check from the Watson investigation, verify
+anything real via web research, summarize, and always ask before committing - a standing instruction).
+
+Ran the workflow for real (not just designed it): refreshed data pulled 18 days after the original Aug 9
+pull surfaced real preseason roster churn (275 depth_chart_rank changes; real RB depth-chart shakeups -
+Hassan Haskins/Zamir White/Emmett Johnson/Trey Sermon all dropped 40-95 spots as their real roles firmed
+up) and one new, real finding worth a human's attention: Las Vegas's Kirk Cousins/Fernando Mendoza QB
+situation is genuinely undecided per live reporting (coach declined to name a starter as of late August),
+and our rookie curve projects Mendoza (pick 1 overall, currently depth_chart_rank==2) at 253.78 points
+purely from draft capital, with no signal that he's currently behind the incumbent - a different, new
+class of question from the Watson case (not a missing-player bug, a "highly-drafted rookie backup
+outprojecting the actual starter" question), flagged for a future investigation, not chased this round.
+
+Also caught and fixed a diff-script bug while building the workflow: my first pass didn't drop rows with
+a null `player_id` before joining old vs. new boards, hitting the same NaN-merge-fan-out class of bug this
+project has documented multiple times (the UDFA-rookies-with-no-gsis_id issue). Fixed in the skill's own
+instructions so future runs don't re-report this known, deliberately-deferred issue as new noise.
+

@@ -1059,6 +1059,76 @@ def build_season_training_table(
     return table
 
 
+def find_players_returning_from_lost_season(
+    season_stats: pd.DataFrame, rosters: pd.DataFrame, target_season: int
+) -> pd.DataFrame:
+    """Find players who have NO season_stats row for `target_season - 1`
+    (zero games played that season - hurt all year, on IR, suspended, etc.)
+    but DO have real games in `target_season - 2` or `target_season - 3`,
+    AND are on an active roster for `target_season` itself - i.e. a real,
+    currently-rostered player returning from a fully lost season, not
+    someone whose career simply ended.
+
+    Found 2026-08-27 via the team-PPG-consistency check: Cleveland's real
+    depth_chart_rank==1 QB is Deshaun Watson (confirmed 2026 Week 1 starter
+    as of a real news check, after missing the entire 2025 season with a
+    second Achilles tear) - but he was completely ABSENT from the board,
+    not floored or discounted. Root cause: build_prediction_features only
+    ever looked at season_stats[target_season - 1], and a player with ZERO
+    games that season has no row there at all - a structural gap, not a
+    calibration issue. Checked the scope before fixing: 42 real, currently
+    active 2026 roster players are missing this same way (Watson, Will
+    Levis, Tank Dell, Jonathon Brooks, and 38 much less relevant deep-bench
+    names) - most would be correctly near-irrelevant even if included, but
+    a few (Watson chief among them) are real, board-relevant misses.
+
+    Validated this is a fittable population before adding it, not just
+    patched in blind: the RAW "missed a season, had games before" cohort
+    (2012-2025, unconditioned) is 90% players whose careers had simply
+    ended (mean 0.59 games in the return season) - clearly not comparable
+    to Watson. But conditioned the SAME way as every other role-transition
+    check this session (current depth_chart_rank==1, from the
+    contemporaneous week-1/2 snapshot): a completely different, much
+    healthier population - mean 11.55 games played, median 14 (n=44). This
+    is close enough to the already-validated 1-7-games-missed role-upgrade
+    cohort's own outcome (QB healthy constant: 11.00 games) that it's
+    reasonably treated as the SAME underlying phenomenon (a current starter
+    with little-to-no recent track record) rather than needing its own
+    separate calibration - once these players get a row at all, the
+    existing role-upgrade machinery (prev_games_played < 8 already
+    naturally includes 0) picks them up automatically.
+
+    Deliberately does NOT extend build_season_training_table (the model-
+    FITTING path) the same way - the Ridge model's own ppg_pred is not
+    where the real accuracy comes from for this population anyway (the
+    board-build-time role-upgrade replacement functions are), and training
+    on this rare, thin-signal population risked destabilizing the model's
+    coefficients for the much larger, well-behaved normal population with
+    little benefit. This function only feeds the PREDICTION path.
+    """
+    had_prev = set(season_stats[season_stats["season"] == target_season - 1]["player_id"])
+    had_earlier = set(
+        season_stats[season_stats["season"].isin([target_season - 2, target_season - 3])]["player_id"]
+    )
+    active_roster = set(
+        rosters[(rosters["season"] == target_season) & (rosters["status"] == "ACT")]["gsis_id"]
+    )
+    returning_ids = (had_earlier - had_prev) & active_roster
+    if not returning_ids:
+        return pd.DataFrame(columns=["player_id", "player_display_name", "position", "games_played",
+                                      "made_playoffs", "touches"])
+
+    latest = (
+        season_stats[season_stats["player_id"].isin(returning_ids)]
+        .sort_values("season")
+        .drop_duplicates(subset="player_id", keep="last")[["player_id", "player_display_name", "position"]]
+    )
+    latest["games_played"] = 0
+    latest["made_playoffs"] = 0
+    latest["touches"] = 0
+    return latest
+
+
 def build_prediction_features(
     season_stats: pd.DataFrame,
     target_season: int,
@@ -1074,15 +1144,17 @@ def build_prediction_features(
     returning player's recency-weighted recent history.
 
     Same construction as build_season_training_table, just for a single
-    target season that doesn't need to already exist in the data. Only
-    includes players who have a season_stats row for target_season - 1 (i.e.
-    played last season) - true rookies with zero NFL history are handled
-    separately (see build_rookie_training_table/project_rookies).
+    target season that doesn't need to already exist in the data. Includes
+    players who have a season_stats row for target_season - 1 (i.e. played
+    last season), PLUS players returning from a fully lost season (see
+    find_players_returning_from_lost_season) - true rookies with zero NFL
+    history at all are handled separately (see build_rookie_training_table/
+    project_rookies).
     """
     prior = season_stats[season_stats["season"] == target_season - 1].copy()
-    table = prior[
-        ["player_id", "player_display_name", "position", "games_played", "made_playoffs", "touches"]
-    ].rename(
+    returning = find_players_returning_from_lost_season(season_stats, rosters, target_season)
+    cols = ["player_id", "player_display_name", "position", "games_played", "made_playoffs", "touches"]
+    table = pd.concat([prior[cols], returning[cols]], ignore_index=True).rename(
         columns={"games_played": "prev_games_played", "made_playoffs": "prev_made_playoffs", "touches": "prev_touches"}
     )
     table["season"] = target_season

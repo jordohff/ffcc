@@ -3,7 +3,9 @@
 Usage:
     uv run scripts/pull_data.py
     uv run scripts/pull_data.py --seasons 2021 2022 2023 2024 2025
-    uv run scripts/pull_data.py --force   # re-fetch, e.g. after changing --seasons
+    uv run scripts/pull_data.py --force        # re-fetch everything, e.g. after changing --seasons
+    uv run scripts/pull_data.py --refresh-live # re-fetch only in-season-live sources (depth chart,
+                                                # rosters, Sleeper, injuries) - fast, for a mid-season refresh
 """
 
 import argparse
@@ -67,7 +69,23 @@ def main() -> None:
         action="store_true",
         help="Re-fetch even if a cached file already exists",
     )
+    parser.add_argument(
+        "--refresh-live",
+        action="store_true",
+        help=(
+            "Re-fetch only the sources that actually change during a live season "
+            "(sleeper_players, current_depth_chart, rosters, injuries) - skips the "
+            "heavy historical-only pulls (weekly_stats, pbp, participation, NGS, "
+            "snap_share, contract_history, team_play_volume, schedules), which don't "
+            "change once a season is over. Use this for an in-season refresh instead "
+            "of --force, which re-pulls everything."
+        ),
+    )
     args = parser.parse_args()
+    live_sources = {"sleeper_players.parquet", "current_depth_chart.parquet", "rosters.parquet", "injuries.parquet"}
+
+    def is_forced(filename: str) -> bool:
+        return args.force or (args.refresh_live and filename in live_sources)
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -93,13 +111,13 @@ def main() -> None:
         "injuries.parquet",
         f"injury reports for seasons {args.seasons}",
         lambda: load_injury_reports(args.seasons),
-        args.force,
+        is_forced("injuries.parquet"),
     )
     _pull_and_cache(
         "sleeper_players.parquet",
         "Sleeper player metadata",
         fetch_sleeper_players,
-        args.force,
+        is_forced("sleeper_players.parquet"),
     )
 
     ngs_seasons = [s for s in args.seasons if s >= NGS_MIN_SEASON]
@@ -129,7 +147,7 @@ def main() -> None:
         "rosters.parquet",
         f"roster info for seasons {roster_seasons}",
         lambda: load_roster_info(roster_seasons),
-        args.force,
+        is_forced("rosters.parquet"),
     )
     _pull_and_cache(
         "draft_picks.parquet",
@@ -141,7 +159,7 @@ def main() -> None:
         "current_depth_chart.parquet",
         f"current ({args.current_season}) depth chart",
         lambda: load_current_depth_chart(args.current_season),
-        args.force,
+        is_forced("current_depth_chart.parquet"),
     )
 
     snap_seasons = [s for s in args.seasons if s >= SNAP_COUNTS_MIN_SEASON]
