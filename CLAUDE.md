@@ -2251,3 +2251,49 @@ closes the open thread from `apply_qb_starter_floor`'s docstring. Matches this p
 of testing a plausible-sounding generalization on real data before shipping it (see also the RB/WR overrating
 investigation and the O-line/incoming-competition null results).
 
+
+
+### 2026-08-28 - does the QB model under-credit rushing volume generally? Tested broadly, still a null result
+
+User pushback on Malik Willis's ppg_pred (13.32, QB26 by rate) - "typically rushing qbs with higher
+projections meet a certain threshold," questioning whether the model structurally underweights rushing
+QBs as a class. This is a broader, whole-population version of a test already run narrowly once before
+(2026-08-27, the role-upgrade-boost-magnitude check: n=33 role-upgrade-cohort-only, rushing-volume split
+p=0.66) - worth re-testing at full scale rather than assuming the narrow result generalizes.
+
+**Real signal exists in the raw same-season relationship.** Regressed same-season QB PPG on
+attempts_pg + passing_epa_pg + carries_pg (566 QB-seasons, games>=8): carries_pg's coefficient is +1.08
+ppg per carry/game, highly significant (t=34.5, p<0.0001) even controlling for passing volume/efficiency -
+rushing production is real, additive fantasy value largely independent of passing stats, exactly matching
+the intuition.
+
+**But the model's own fitted, PREDICTIVE coefficient on wavg_carries_pg is only +0.42** - about 2.6x
+smaller. Checked whether this gap is a bug (under-crediting) or correctly-calibrated shrinkage (rushing
+volume isn't perfectly sticky year to year, unlike its same-season mechanical relationship to points):
+wavg_carries_pg (recency-weighted history) correlates with a QB's own actual next-season carries_pg at
+r=0.718, not 1.0 - real, but well short of perfect persistence, so a smaller PREDICTIVE coefficient than
+the same-season MECHANICAL one is expected, not automatically wrong.
+
+**Decisive test: walk-forward residual check, full QB population (not just the role-upgrade cohort).**
+Trained on seasons < T, predicted T, for T = 2018-2025 (475 QB-season predictions), and checked whether
+the residual (actual ppg - predicted ppg) correlates with wavg_carries_pg out of sample. Result: corr =
+0.009 - no relationship. Split into a high-rushing bucket (wavg_carries_pg >= 4, Willis's own recent
+range) vs. low: high-rushing mean resid = +0.034 ppg (p=0.96, n=97), low-rushing = -0.20 ppg (p=0.44,
+n=378) - both statistically indistinguishable from zero. **No exploitable bias for rushing QBs as a class,
+confirmed at full population scale, matching and generalizing the earlier narrow n=33 null result.**
+
+**Willis's own feature decomposition, checked directly**: his real wavg_carries_pg (4.29/game) contributes
++1.79 ppg to his RAW model prediction (8.30, before board-time adjustments) - the 3rd-largest positive
+contributor after wavg_ppg (+3.19) and sos_pts_allowed_pg (+2.97) - so his rushing floor is not being
+ignored by the base model. The already-shipped QB_ROLE_UPGRADE_BOOST (+5.02, a separate, already-validated
+correction for current starters with thin trailing history) then applies on top, landing at his final
+13.32 ppg_pred. His remaining suppression relative to a true middle-tier starter comes from wavg_ppg
+(built on a small, mostly-poor-performance sample) and team_changed (-1.16, a real drag for a real 2026
+team switch), not from an under-weighted rushing signal.
+
+**Conclusion: the intuition is real in the mechanical sense (rushing points are real, additive, and the
+model does credit them) but does NOT indicate a predictive bug** - tested broadly and rigorously, not just
+accepted or dismissed on priors. No code change. Matches this project's standing discipline of re-testing
+a plausible, user-flagged pattern at the scale needed to actually trust the answer, even when an earlier,
+narrower test already pointed the same direction.
+
