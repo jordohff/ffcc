@@ -2947,3 +2947,58 @@ scrutiny for the first time in the project's history, holds up as sound - no arc
 code shipped from this investigation; a genuine, validated null result closing out the "hallucinating the
 goal" concern with real evidence rather than reassurance.
 
+
+
+### 2026-08-28 - first paid data source (FantasyPoints): loaders built, all four reports tested, none shipped
+
+User got FantasyPoints access and provided four weekly export reports (offensive snap share RB/WR/TE/FB,
+receiving route share WR/TE, receiving target share WR/TE, team-level Pass Rate Over Expectation), eventually
+covering 2021-2025 after starting with just 2025.
+
+**Infrastructure**: `src/ffmodel/paid_data.py` (new module, separate from `data.py` since these are hand-
+downloaded CSVs, not programmatic pulls) - handles FantasyPoints' export quirks: wide W1-W18 format (melted
+to long), a different team-code scheme (ARZ/BLT/CLV/HST vs standard ARI/BAL/CLE/HOU), multi-team players
+shown as "ARZ, DEN" (first team kept), and no player_id at all - only a display name with suffixes (Jr./Sr./
+II/III/IV) already stripped, requiring a name crosswalk against this project's own weekly_stats
+(`build_name_crosswalk`, same suffix-stripping applied for matching). Files live in `data/paid/<year>/`,
+gitignored (paid third-party data, not ours to redistribute even in a private repo - see .gitignore).
+
+**Real data-quality catch before analysis**: verified every file's own `Season` column against its folder
+before trusting the multi-year set - found `data/paid/2024/proeReportExport (1).csv` actually contained 2025
+data (a real misfile), caught before it could poison the test. User re-downloaded the correct file; re-
+verified clean. Also found and fixed a real team-code gap: 2021 PROE failed to map "Football Team"
+(Washington's name before the 2022 "Commanders" rebrand) - added to `MASCOT_TO_TEAM`.
+
+Match rates (player-level reports, name crosswalk): 90.3-94.7% across all 5 seasons, consistently - the
+unmatched ~5-10% is dominated by fullbacks (a position this project doesn't track at all) and deep-bench/
+1-3-game players; one real, notable gap (Travis Hunter, 2025) traces to a pre-existing hole in nflreadpy's
+own weekly_stats, not a crosswalk bug.
+
+**Tested all four reports, walk-forward where the 5-season depth allowed it (2022-2025 test seasons, lagged
+so each season's report predicts the NEXT season - same convention as SOS/vacated-opportunity elsewhere in
+this pipeline) - none shipped:**
+
+1. **PROE (team-level Pass Rate Over Expectation)**: real same-season relationship with real outcomes (QB
+   r=0.392, WR r=0.135, TE r=0.107, all p<0.05 - not spurious) - but ZERO marginal predictive value once
+   lagged for next-season use, at every position (QB/RB/WR/TE all p=0.44-0.64 against the existing model's
+   own residual). Team PROE persists only moderately year to year (r=0.479 - real scheme shifts happen), and
+   whatever real "pass-heavy team helps its pass-catchers" signal exists is already absorbed into each
+   player's own trailing usage stats, which the model already has. Not shipped.
+2. **WR route/target share**: near-total redundancy with what this project already computes internally from
+   free nflreadpy data - target_share correlates at r=0.986, routes_run_pg at r=0.952 with the paid
+   equivalents (same underlying signal, different source). No marginal value beyond what's already there
+   (p=0.06-0.45). Genuinely useful side-finding: this is real, independent, paid-data confirmation that the
+   existing free-data-derived features are accurate, not just a null result.
+3. **TE route/target share**: the ONE report that showed a real-looking pooled signal (target_share r=0.120
+   p=0.018, route_share r=0.124 p=0.014, n=390) - but split into a proper calibrate(2022-2023)/validate
+   (2024-2025) check, NEITHER survives independently (calib p=0.05-0.06, valid p=0.08-0.13 for both). Same
+   direction and magnitude in both halves, consistent with a real-but-underpowered signal rather than pure
+   noise, but doesn't clear this project's bar for shipping - the pooled significance was an artifact of
+   combining both halves into a bigger sample, the same trap this project has been burned by before. Not
+   shipped; worth revisiting if more seasons of TE-specific charting become available.
+
+**Net conclusion**: all four reports tested with real rigor, none justified a pipeline change this round -
+an honest, complete null result, not a wasted effort. The loader infrastructure (`paid_data.py`,
+`build_name_crosswalk`, the verified 5-season combined data) is real and kept for future paid-data drops or
+a different hypothesis, even though this round's specific angles didn't pan out.
+

@@ -18,3 +18,9 @@ output/projections/*
 !output/projections/.gitkeep
 output/draft_rankings/*
 !output/draft_rankings/.gitkeep
+
+# Paid third-party data (FantasyPoints, etc.) - kept local only, not
+# committed, since redistributing someone else's licensed data isn't ours
+# to do even in a private repo. Drop downloaded CSVs in data/paid/.
+data/paid/*
+!data/paid/.gitkeep
