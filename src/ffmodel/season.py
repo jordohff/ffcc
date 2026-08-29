@@ -1395,6 +1395,42 @@ def build_rookie_training_table(season_stats: pd.DataFrame, draft_picks: pd.Data
     return combined
 
 
+ROOKIE_GAMES_CEILING = {"QB": 17, "RB": 15, "WR": 15, "TE": 17}
+"""Per-position cap on the rookie games curve's raw fit - replaces a flat
+17 (see project_rookies/compute_rookie_walk_forward_residuals). QB's raw
+fit never exceeds 17 in the first place (games_intercept ~16), so it's
+left at 17 (a no-op). RB/WR/TE all have a raw fit that blows past 17 at
+the top of the draft (intercepts of 23.2/22.5/29.2) - real historical top-
+15-pick averages are RB 14.75, WR 12.90, TE 15.17 (2010-2025), so a flat
+17 silently flattened nearly every early-round pick to an identical,
+unrealistically optimistic number (Jeremiyah Love, pick 3, and Jadarian
+Price, pick 32, both got exactly 17.0 despite an enormous real gap in
+draft capital - the SAME differentiation problem the ppg curve was
+originally built to fix, just on the games side).
+
+Walk-forward tested candidate ceilings (12-17) against real outcomes,
+2015-2025: RB/WR both show a small, real improvement at ceiling=15-16 (RB
+MAE 4.556->4.547, WR 4.511->4.501) with no benefit from going lower (13:
+worse, 12: worse); TE shows NO benefit from lowering at all (17 stays
+best) - left unchanged. The AGGREGATE improvement is small because only a
+handful of real picks are early enough to ever hit the old ceiling (RB:
+n=12 in the top 15 across 15 years) - but that's exactly the point: this
+fixes a small number of real, high-profile cases (a top pick shouldn't
+get the identical games_est as a mid-first-rounder) without materially
+changing anything for the much larger bulk of the class.
+
+Chose 15 (not the raw top-15-pick empirical mean of ~13-15) deliberately
+more generously than the raw average - matching the veteran durability
+principle validated the same day: an expected-value MEAN sitting below a
+full season does NOT mean "assume everyone misses games," it means a real
+fraction of the historical cohort did, which pulls the average down even
+though many players in the same cohort played all 17. The mean staying
+below 17 is correct; showing that many still DO hit 17 is what the
+Monte Carlo simulation's percentiles/boom_prob are for, not the point
+estimate itself.
+"""
+
+
 def fit_rookie_curve(rookie_table: pd.DataFrame) -> pd.DataFrame:
     """Historical rookie-season PPG and games played as a smooth function of
     OVERALL DRAFT PICK, fit per position - the whole "model" for projecting
@@ -1459,7 +1495,9 @@ def project_rookies(current_draft_picks: pd.DataFrame, rookie_curve: pd.DataFram
     picks = picks.merge(rookie_curve, on="position", how="left")
     log_pick = np.log(picks["pick"])
     picks["ppg_pred"] = (picks["ppg_intercept"] + picks["ppg_slope"] * log_pick).clip(lower=0)
-    picks["games_est"] = (picks["games_intercept"] + picks["games_slope"] * log_pick).clip(lower=0, upper=17)
+    raw_games = picks["games_intercept"] + picks["games_slope"] * log_pick
+    ceiling = picks["position"].map(ROOKIE_GAMES_CEILING).fillna(17)
+    picks["games_est"] = raw_games.clip(lower=0).combine(ceiling, min)
     picks = picks.rename(columns={"gsis_id": "player_id"})
     return picks.drop(columns=["ppg_intercept", "ppg_slope", "games_intercept", "games_slope", "n"])
 
@@ -1602,7 +1640,9 @@ def compute_rookie_walk_forward_residuals(
             continue
         log_pick = np.log(test["pick"].to_numpy(dtype=float))
         ppg_pred = (test["ppg_intercept"] + test["ppg_slope"] * log_pick).clip(lower=0)
-        games_pred = (test["games_intercept"] + test["games_slope"] * log_pick).clip(lower=0, upper=17)
+        raw_games = test["games_intercept"] + test["games_slope"] * log_pick
+        ceiling = test["position"].map(ROOKIE_GAMES_CEILING).fillna(17)
+        games_pred = raw_games.clip(lower=0).combine(ceiling, min)
         test["ppg_resid"] = test["ppg"] - ppg_pred
         test["games_resid"] = test["games_played"] - games_pred
         test["games_est"] = games_pred
@@ -1626,7 +1666,7 @@ def _draw_simulated_totals(
     n_sims: int,
     seed: int,
     max_games: int = 17,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """Shared low-level Monte Carlo draw, used by both simulate_season_
     outcomes (phase 1 - every player on the board) and
     simulate_roster_outcomes (phase 2 - a specific drafted roster).
@@ -1669,6 +1709,22 @@ def _draw_simulated_totals(
     a similarly high games_est - the correct asymmetry (real, deserved) is
     preserved without cross-contaminating from low-games_est rows whose
     resampled residuals don't reflect the same real ceiling proximity.
+
+    Returns (total_draws, games_draws) - both (n_players, n_sims) arrays.
+    games_draws is exposed separately (not just folded into total_draws) so
+    callers can report real per-player probabilities like "how often does
+    this player actually play a full season" (see sim_full_season_prob in
+    simulate_season_outcomes) - a genuinely different question from the
+    total-points percentiles, prompted 2026-08-28 by a direct challenge to
+    the mean-based games_est: is 17 games actually the modal/majority
+    outcome for a healthy player, or just assumed to be? Backtested
+    directly (not assumed): even among players who were THEMSELVES
+    perfectly healthy the prior season (prev_games_played==17), only
+    25-31% repeat a full 17-game season the following year (45-50% hit
+    16+), across all four positions - so 17 is not a hidden majority
+    outcome the mean is obscuring; the real distribution is genuinely
+    spread out even in the best-case cohort, and games_est being an
+    average below 17 is a fair summary of it, not an artifact.
     """
     rng = np.random.default_rng(seed)
     ppg_pred = sub_board["ppg_pred"].to_numpy()
@@ -1678,6 +1734,7 @@ def _draw_simulated_totals(
     games_bucket = pd.cut(sub_board["games_est"], GAMES_EST_BUCKETS)
     n_players = len(sub_board)
     total_draws = np.zeros((n_players, n_sims))
+    games_draws_out = np.zeros((n_players, n_sims))
 
     vet_residuals = vet_residuals.assign(_bucket=pd.cut(vet_residuals["games_est"], GAMES_EST_BUCKETS))
     rookie_residuals = rookie_residuals.assign(_bucket=pd.cut(rookie_residuals["games_est"], GAMES_EST_BUCKETS))
@@ -1713,7 +1770,8 @@ def _draw_simulated_totals(
                     np.round(games_est[role_mask][:, None] + use_pool["games_resid"].to_numpy()[idx]), 0, max_games
                 )
                 total_draws[role_mask] = ppg_draws * games_draws
-    return total_draws
+                games_draws_out[role_mask] = games_draws
+    return total_draws, games_draws_out
 
 
 def simulate_season_outcomes(
@@ -1740,8 +1798,17 @@ def simulate_season_outcomes(
       caliber season" - directly useful for the "draft for upside" framing
       this project has repeatedly validated over discounting for volatility
       (see the rejected risk-adjusted-VBD research).
+    - sim_full_season_prob: P(simulated games_played >= 16) - "how often
+      does this player actually play a (near-)full season," added
+      2026-08-28 in direct response to a challenge that games_est (a mean)
+      might be under-representing how many players just play all 17. Real
+      answer, backtested rather than assumed: even among players who were
+      THEMSELVES perfectly healthy the prior season, only 45-50% repeat
+      16+ games the following year - so this number is usually well below
+      50% for most players, correctly reflecting genuine, backtest-
+      confirmed spread in the distribution, not an artifact of the mean.
     """
-    total_draws = _draw_simulated_totals(board, vet_residuals, rookie_residuals, n_sims, seed, max_games)
+    total_draws, games_draws = _draw_simulated_totals(board, vet_residuals, rookie_residuals, n_sims, seed, max_games)
     replacement_by_pos = board.groupby("position")["replacement_points"].first()
     boom_by_pos = board.groupby("position")["total_points_pred"].apply(lambda s: s.nlargest(5).mean())
     replacement_pts = board["position"].map(replacement_by_pos).fillna(0.0).to_numpy()[:, None]
@@ -1757,6 +1824,7 @@ def simulate_season_outcomes(
             "sim_p90": np.percentile(total_draws, 90, axis=1),
             "sim_bust_prob": (total_draws < replacement_pts).mean(axis=1),
             "sim_boom_prob": (total_draws >= boom_pts).mean(axis=1),
+            "sim_full_season_prob": (games_draws >= 16).mean(axis=1),
         }
     )
 
@@ -1803,7 +1871,7 @@ def simulate_roster_outcomes(
       median/p90), so a user can see which roster spots are driving the
       team's own variance, not just the aggregate number.
     """
-    total_draws = _draw_simulated_totals(roster_board, vet_residuals, rookie_residuals, n_sims, seed, max_games)
+    total_draws, _ = _draw_simulated_totals(roster_board, vet_residuals, rookie_residuals, n_sims, seed, max_games)
     team_totals = total_draws.sum(axis=0)
 
     player_detail = pd.DataFrame(

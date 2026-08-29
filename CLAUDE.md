@@ -2846,3 +2846,104 @@ injury boost) -> Dak Prescott (exposed the boost's limits) -> weighting-scheme t
 alternatives) -> GBM backtest and shipped as the new base durability model, replacing four separate hand-
 patched corrections with one validated, richer model.
 
+
+
+### 2026-08-28 - rookie games ceiling fix, and the mean-vs-mode question tested directly
+
+Immediate follow-up: once veteran durability was properly discounted toward real historical rates, the
+rookie curve's OWN version of the same silent-ceiling bug (already flagged as a known soft spot back on
+2026-08-13) became glaring by comparison - Jeremiyah Love and Carnell Tate (both real 2026 top picks) sat at
+a flat games_est=17.0, now clearly out of step with veterans who'd just been properly discounted.
+
+**Confirmed the mechanism, quantified the real gap.** The rookie curve's raw (uncapped) log-linear fit
+massively exceeds 17 at the top of the draft for RB/WR/TE (games_intercept 23.2/22.5/29.2 respectively - QB's
+own intercept, 16.0, never exceeds 17, so QB was never affected) - meaning nearly every early pick silently
+collided with the old flat `clip(upper=17)` and got flattened to an identical number regardless of how early
+they went. Real historical top-15-pick averages: RB 14.75, WR 12.90, TE 15.17 (2010-2025).
+
+**Learned from the earlier failed full-curve-reshape attempt (2026-08-28, logit-transform test) - fixed the
+CEILING specifically instead of reshaping the whole curve.** Walk-forward tested candidate ceilings (12-17)
+against real outcomes, 2015-2025: RB/WR show a small, real improvement at ceiling=15-16 (RB MAE 4.556->4.547,
+WR 4.511->4.501), TE shows NO benefit from lowering (17 stays optimal, left unchanged). Shipped
+`ROOKIE_GAMES_CEILING = {"QB": 17, "RB": 15, "WR": 15, "TE": 17}`, applied in both `project_rookies` and
+`compute_rookie_walk_forward_residuals` (so the ceiling used for prediction and for the Monte Carlo residual
+pool stay consistent) - deliberately set at 15 rather than the raw empirical top-tier average (~13-15),
+leaving room rather than being maximally punitive.
+
+**User pushed back hard and correctly on the framing, twice - both pushbacks led to real, useful additions,
+not just reassurance.** First: "not everyone will miss 3-4 games, many will play 17 - shouldn't this curve be
+elevated?" Second, more precisely: "we are purpose-driven for ONE singular season... we should backtest how
+many players play 17 and use that as well." Rather than just asserting the mean is correct, ACTUALLY
+backtested it: among players who were THEMSELVES perfectly healthy the prior season (prev_games_played==17 -
+literally the best-case cohort), only 25-31% repeat a full 17-game season the following year, and only
+45-50% hit 16+, consistent across all four positions. This directly answers the mean-vs-mode question with
+real data rather than assumption: 17 is NOT a hidden majority outcome the mean is obscuring - the real
+distribution is genuinely spread out even in the best-case cohort, so a mean-based games_est below 17 is a
+fair, non-artifactual summary, not underselling durability.
+
+**Shipped a new board column making this concrete per-player rather than just as a population statistic**:
+`sim_full_season_prob` (P(simulated games_played >= 16), drawn from the same Monte Carlo machinery already
+built). Required exposing `games_draws` as a second return value from `_draw_simulated_totals` (previously
+only the merged total_draws was returned) - both `simulate_season_outcomes` and `simulate_roster_outcomes`
+updated accordingly. This directly operationalizes "many will still play 17" as a real, per-player,
+backtested number sitting right next to games_est, rather than leaving it implicit or asserted. Verified:
+Gibbs sim_full_season_prob=0.54, Love=0.58, St. Brown=0.37, Jonathan Taylor (more real recent injury
+history)=0.18 - sensible, differentiated numbers matching each player's real durability profile.
+
+**Verified St. Brown ranking #2 overall (separately flagged as "crazy") is real, not an artifact**: pulled
+his and Ja'Marr Chase's actual games-played history side by side - St. Brown has literally never missed more
+than 1 game in 5 years (16/16/16/17/17), while Chase has a real missed-significant-time season on record
+(17/12/16/17/16, the 2022 dip). The GBM durability model correctly rewards St. Brown's superior CAREER-LONG
+consistency (not just his last 3 years, which look similar to Chase's) - a legitimate, data-grounded
+separation, not a modeling artifact. No change made.
+
+Regenerated both boards (740 rows each). Net effect: Love #4->#6 (VBD 122.5->107.7), Tate #9->#17 (93.6->
+66.3), Tyson #31->#38 - rookies now correctly differentiated by draft slot on the games side (not just rate)
+and brought into line with the newly-realistic veteran durability standard, while the simulation output
+makes the "many still hit 17" reality visible and quantified rather than left implicit in a single point
+estimate.
+
+
+
+### 2026-08-28 - "are we hallucinating the goal?" - verified every claim, then closed the loop with a real GBM-for-rate test
+
+User's challenge, after a long stretch of durability-focused work: "are we just ranking based on durability or
+are we ranking for actual output? i feel like we've started hallucinating on the goal here." Asked to verify
+every claim in the response rather than take it on trust - did so, in order, and found one real error along
+the way.
+
+1. **Ranking formula**: confirmed directly in code - `total_points_pred = ppg_pred * games_est` (8 call sites),
+   and `compute_vbd` ranks/subtracts replacement strictly off `total_points_pred`. Durability was never a
+   separate ranking axis - it's one of two multiplicative inputs into total expected output.
+2. **Rate-alone correlation with real outcomes**: re-derived from scratch (not trusted from memory) - Spearman
+   0.927-0.938 across all four positions, 80-84% of top-24-by-rate players stay top-24-by-total. Reproduced
+   exactly.
+3. **"~1-in-5 reshuffled" claim**: confirmed as the arithmetic complement of #2 (100% minus 80-84% overlap).
+4. **Recent effort skewed toward durability**: confirmed via actual commit history, not impression - 6-7 of
+   the last 10 commits were primarily durability work; only one touched rate, and it shipped no code (a null
+   result). The rate feature set itself hadn't changed since commit 2618936, very early in the project.
+5. **Caught and corrected a real error**: originally claimed "GBM was tested for ppg before, Ridge kept for
+   interpretability" - checked git history for `HistGradientBoostingRegressor` in `season.py` specifically
+   and found it appears NOWHERE before this session's durability work. The earlier GBM-vs-Ridge comparison
+   was for the WEEKLY model (`model.py`, a different, largely dormant pipeline), not the draft-rankings rate
+   model. The accurate statement is stronger than what was first said: the season-long rate model had NEVER
+   been compared against anything but Ridge, at all - not a revisited decision, genuinely untested ground.
+
+**Closed the loop with a real test, not just a promise to look into it.** Built the same walk-forward
+comparison used for durability (GBM vs Ridge, same POSITION_VET_FEATURES each model already uses, 2012-2025,
+14 seasons, minimum 50-148 players/season per position) - evaluated on BOTH MAE and within-season Spearman
+rank correlation (the actual metric this pipeline cares about for ranking, not just point-error). Result: a
+genuine, clean NULL - GBM does not meaningfully beat Ridge for rate prediction. MAE differences are all
+within 1-2.5% either direction (QB/RB/TE: Ridge slightly better; WR: GBM slightly better), Spearman
+differences are noise-level (within 0.001-0.01 for every position). Unlike durability (where GBM's edge was
+a consistent 8-11%), there's no equivalent unexploited signal here - the rate model already has a rich,
+deliberately-built feature set (9-24 features with real linear relationships), unlike durability's original
+2-3-feature formula, which is exactly why GBM had real room to add value there and doesn't here.
+
+**Net conclusion**: the recent skew toward durability work wasn't chasing a rabbit hole while a bigger,
+neglected problem sat untouched - it was justified by real, confirmed bugs (four separate corrections, then
+a full architecture replacement, all individually validated). The rate model, when finally given equivalent
+scrutiny for the first time in the project's history, holds up as sound - no architecture change needed. No
+code shipped from this investigation; a genuine, validated null result closing out the "hallucinating the
+goal" concern with real evidence rather than reassurance.
+
