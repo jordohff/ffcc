@@ -3465,3 +3465,67 @@ recovery reported but not yet proven on the field" premium the market may be pri
 statistical model structurally can't credit until it's demonstrated). This is now a closed, evidence-backed
 diagnostic, not an open bug - no further code changes indicated from this specific investigation.
 
+
+
+### 2026-08-29 (cont'd) - Kraft/Burden flagged: real gaps found, traced to a breakout-trajectory pattern, not coachspeak
+
+User flagged Tucker Kraft (TE, GB) and Luther Burden III (WR, CHI) as further real market-consensus gaps, and
+said the project will need to incorporate "coachspeak" (qualitative beat-reporter/coach intel) on a future
+session to close gaps like this. Verified both gaps via web search before doing anything else: Kraft's real
+ADP is TE5-6 (~69th overall) vs our board's TE20 (~124th) - he was literally TE2 in scoring behind only
+McBride before a season-ending ACL/meniscus tear, and Green Bay's GM says his rehab is "going great," ahead
+of schedule. Burden's real ADP ranges WR24-56 across sources vs our board's WR52 (~125th, behind even the
+bearish end) - DJ Moore's trade to Buffalo opened real target share for him in year two.
+
+**Investigated before assuming this needs coachspeak - found a real, DATA-ONLY explanation for both, not a
+qualitative-intel gap.** Kraft's actual season-by-season ppg is a clean, steep, monotonic breakout (2023: 3.39
+-> 2024: 6.66 -> 2025: 10.65, injury-shortened at 8 games). The project's standard `HISTORY_WEIGHTS = [0.5,
+0.3, 0.2]` recency blend still gives his now-stale rookie-year 3.39 ppg a full 20% weight. Burden shows the
+identical pattern on a single-season timescale: a true rookie whose 2025 game log has an unmistakable in-
+season role ascension (1-4 targets/game weeks 1-8, climbing to 6-9 targets/game weeks 14-18), but his full-
+season average (5.39 ppg) is dominated by the early, since-outgrown low-usage stretch.
+
+**Not tested or shipped this session** - flagged as the concrete next hypothesis (does a differently-shaped
+recency weighting, or a trend-extrapolation approach, predict real next-season outcomes better than the
+current flat blend for players on a clear improvement trajectory?), saved to persistent memory
+(`breakout_trajectory_hypothesis.md`) rather than acted on immediately, since: (1) it's a change to a
+foundational, widely-used feature (HISTORY_WEIGHTS affects every player, not just these two - a much bigger
+blast radius than the TE-specific fixes shipped earlier today), and (2) this session already had to revert
+two corrections that were validated on too narrow a test before catching the mistake - this one needs the
+same walk-forward-against-real-next-season rigor before shipping anything, not a quick anecdote-driven patch.
+The "coachspeak" plan itself is also saved to memory (`coachspeak_plan.md`) - it needs the user's own compiled
+beat-reporter data file, which doesn't exist yet, so it's a separate, later-scheduled piece of work from the
+breakout-trajectory hypothesis (which is fully testable right now with data already in the pipeline).
+
+
+
+### 2026-08-29 (cont'd) - breakout-trajectory hypothesis: tested three ways, rejected all three - real pattern, not statistically exploitable
+
+User confirmed the diagnosis and added a third example (Parker Washington, WR, JAX) with the same framing:
+"it's near impossible to root it in data but these guys are going to have many chances to churn a big year."
+Verified Washington via web search before testing anything: real ADP ~67-84 overall (WR31) vs our board's
+WR47 (~111th) - and independently confirmed his real 2025 surge ("WR12 over the final nine weeks of the
+regular season" per public reporting), matching his raw game log exactly (final 3 games of 2025 averaged
+~15.4 ppg vs a 7.92 season average).
+
+**Tested the hypothesis properly, three ways, using the walk-forward-against-real-outcomes rigor this session
+already re-established - all three came back clean nulls:**
+1. `ppg_trend` (progressive within-season recency-weighted ppg minus flat average - the exact methodology
+   already validated for `snap_share_trend`, applied to points instead): made every position flat-to-WORSE
+   (QB clearest: Spearman 0.699->0.688, MAE 3.988->4.021). Likely explanation: raw fantasy points carry far
+   more week-to-week noise (TD variance, garbage time) than snap share does, so a points-based "trend" is
+   mostly noise.
+2. `targets_trend` (same methodology, opportunity-based instead of points-based, to strip out scoring noise):
+   essentially flat everywhere (all four positions within ~0.1-0.3%, noise-level either direction).
+3. Restricted to a young-player cohort (age<25, matching all three named examples) for WR/TE specifically:
+   still flat (WR MAE 2.273->2.276, TE 1.740->1.736).
+
+**Conclusion: the pattern is real (all three anecdotes independently verified via web search) but genuinely
+not exploitable as a simple trend feature, tested three reasonable ways.** This directly, empirically confirms
+the user's own stated intuition, not just philosophically - `prev_snap_share_trend` (already shipped, kept)
+likely already captures what CAN be extracted about in-season role change from structured data; what's left
+for cases like these needs something closer to real coaching intent/beat-reporter signal than any counting
+stat can provide. No code shipped. Closed this specific data-only avenue in persistent memory
+(`breakout_trajectory_hypothesis.md`, updated from "untested" to "tested and rejected") - the coachspeak plan
+remains the live path for this whole class of case, not a fallback after a failed data fix.
+
