@@ -3002,3 +3002,118 @@ an honest, complete null result, not a wasted effort. The loader infrastructure 
 `build_name_crosswalk`, the verified 5-season combined data) is real and kept for future paid-data drops or
 a different hypothesis, even though this round's specific angles didn't pan out.
 
+
+
+### 2026-08-28 - unrostered-veteran games_est: real, large, general fix (Tyreek Hill investigation)
+
+User asked to look into Tyreek Hill's `team=NaN` gap specifically - he's currently unsigned and recovering
+from a serious injury. Verified the real situation via web search before assuming anything: Miami actually
+RELEASED him (not just an unresolved data gap - he genuinely has no team), and the most recent reporting has
+him still saying he has "no power" in his leg with no set 2026 return timeline. `team=NaN` is CORRECT here,
+not a bug - both nflverse and Sleeper are right that he has no team.
+
+**The real, fixable question was different: does games_est account for currently having no roster spot at
+all?** It didn't - `DURABILITY_FEATURES` (the GBM durability model's inputs) is built entirely from trailing
+performance/health stats, with no signal for current roster status. Hill's games_est (7.31) was computed as
+if he were a normal rostered veteran with his exact recent injury history, with no awareness he currently has
+no team to report to. Checked the scope first: 58 players on the current board share this null-team
+situation, not just Hill (DeAndre Hopkins, Russell Wilson, Nick Chubb, Tyler Lockett, and more) - so this
+needed a general fix, not a Hill-specific patch.
+
+**Tested using the same contemporaneous-depth-chart methodology already validated elsewhere in this pipeline**
+(role security discount, QB backup games_est) as a real historical proxy for "had no team at this point in
+the year": for 2019-2024, checked whether being ABSENT from every team's real week-1/2 depth chart - despite
+having enough trailing history to get a real games_est - predicts a bias beyond what the durability model
+(no roster-status feature) already accounts for.
+
+Result: a real, LARGE, general effect, not position or injury-specific. Split by whether the player's recent
+health record looked normal or already-injury-shortened:
+- **Unrostered + recent injury** (prev_games_played<8, Hill's exact shape): mean games_resid -1.82 (p<0.0001,
+  n=256) - real games played averaged only 4.27, not the ~7 the trailing-stats-only model would give.
+- **Unrostered but otherwise healthy** (prev_games_played>=8, e.g. an aging veteran cut with no obvious
+  injury): mean games_resid -2.96 (p<0.0001, n=216) - an even LARGER effect, real mean games played only
+  5.68. Makes sense: no injury to explain the gap means an even stronger "the market has passed on them"
+  signal than an injury does.
+
+Calibrated (2019-2021) and validated (2022-2024) separately for both buckets - both replicate almost exactly
+out of sample (injured: 4.63 vs 3.96 actual games in each half; healthy: 5.65 vs 5.70 - both p<1e-7 in BOTH
+halves, one of the cleanest replications this project has found).
+
+**Shipped `apply_unrostered_games_est`** (season.py): REPLACES games_est (matching the "replace, don't patch
+a structurally uninformative base" precedent from the role-upgrade durability redesign - the player's own
+trailing stats are genuinely uninformative here, what matters is roster status, which the model has zero
+signal for) for any veteran with `team` still null after `apply_current_team_from_sleeper`, using the
+appropriate bucket (`UNROSTERED_GAMES_EST = {"injured": 4.27, "healthy": 5.68}`). Applies to all 58 affected
+players, not just Hill, regardless of position.
+
+**Verified on the regenerated board**: Tyreek Hill games_est 7.31 -> 4.27, total_points_pred 89.9 -> 52.5,
+overall rank 38 -> 245 - a real, substantial, evidence-based correction reflecting his genuinely uncertain
+situation, not a name-targeted patch (he happened to be the highest-value player in the affected population,
+which is why he was the one flagged, but the fix is general). DeAndre Hopkins, Russell Wilson, Nick Chubb,
+and the other 54 affected players moved similarly. Backtest headline numbers unchanged (board-build-time fix,
+not a training-time change) - matches every other role-transition-style correction in this pipeline.
+Regenerated both boards (740 rows each, no new NaN-merge issues).
+
+
+
+### 2026-08-29 - null-team root cause (real gap found and fixed) and games_est shrinkage retested under GBM (null result)
+
+Picked up two open threads flagged at the end of the previous session: (1) WHY 58 players have no resolvable
+team in either nflverse or Sleeper, and (2) whether the general games_est shrinkage correction (tested real,
+but reverted 2026-08-28 for creating a rookie/veteran inconsistency) should be revisited now that games_est
+is GBM-based rather than the old linear formula it was originally tested against.
+
+**Thread 1 - real, fixable gap found: a live depth-chart feed updates faster than both existing team sources.**
+Verified a sample of the 58 via web search before assuming anything (matching this project's standing
+practice) rather than trusting stale training knowledge for current 2026 facts: confirmed Nick Chubb actually
+retired (Aug 22, 2026) and Hopkins/Lockett/Ekeler are all real, current free agents - `team=NaN` is CORRECT
+for all of them, not a bug. But cross-checking the full 58 against `current_depth_chart.parquet` (loaded
+every pull but, until now, only ever used for `pos_rank`, never `team`) found 11 of the 58 DO have a real
+team there despite being absent from both nflverse rosters AND Sleeper's player list - most notably Najee
+Harris, confirmed via web search to have signed a one-year deal with the Giants in August 2026, so recently
+that neither of the other two (slower-updating) sources had caught up, while the depth chart already had him
+at RB, pos_rank 3, team NYG. Depth chart's own `team` column already uses the same standard codes as
+everywhere else in this pipeline (ARI/LA/LAC/LV) - no TEAM_CODE_FIXES-style normalization needed.
+
+Shipped `apply_depth_chart_team_fallback` (season.py) - a third tier after nflverse (periodic) and Sleeper
+(live but still has real gaps), filling any `team` still null after `apply_current_team_from_sleeper` from
+the depth chart, never overriding an existing value. Wired into build_draft_rankings.py between the Sleeper
+override and `apply_unrostered_games_est`, so recovered players get their real, role-aware games_est (via the
+normal depth-chart-rank machinery) instead of the generic unrostered-veteran fallback. Verified: Najee Harris
+now resolves to NYG with games_est=6.13 (role-security-discounted RB3 behind Skattebo/Tracy/Singletary, not
+the flat 5.68 "unrostered but healthy" number he'd have gotten otherwise). 47 of the original 58 remain
+correctly unresolved (real free agents/retirees) - down from 58, not eliminated entirely, which is the right
+outcome since most of the population really is unrostered. Both boards regenerated (740 rows each, unchanged
+row count - a pure team-resolution and games_est-precision fix, not a population change).
+
+**Thread 2 - retested under GBM, found a real-but-narrow effect that did NOT survive out-of-sample MAE
+testing - not shipped, a genuine null result.** Used the existing `compute_walk_forward_residuals`/
+`compute_rookie_walk_forward_residuals` infrastructure (already GBM-based since the 2026-08-28 replacement)
+to re-run the same bias-by-games_est-bucket check the original (reverted) correction was built from. Found a
+real, statistically significant negative bias specifically in the games_est>=15 tier (mean -2.01, n=107,
+p<0.0001), replicating in both calibration (2018-2022: -2.24, p=0.0003) and validation (2023-2025: -1.83,
+p=0.001) halves - unlike the original broad, whole-population linear-slope bias the old formula had, this is
+narrow (only 18 of 740 players on the current board sit in this tier, mostly durable QBs) and doesn't
+obviously recreate the rookie-vs-veteran inconsistency that sank the earlier attempt (rookies barely reach
+this tier at all - RB/WR are capped at 15 by ROOKIE_GAMES_CEILING, and the few QB/TE rookies that do reach it
+show no significant bias, p=0.73, n=28).
+
+But digging into the DISTRIBUTION (not just the mean) before shipping anything - matching this project's
+established discipline of checking whether a plausible-looking bias is actually a broad population effect or
+a few outliers dominating a mean - found the -2.0 mean is driven almost entirely by a real but small (20%,
+n=21) subset of genuinely catastrophic, unpredictable injuries (mean -8.82 games for that subset); the other
+80% has mean -0.34, median +0.07 - essentially unbiased. A Wilcoxon signed-rank test on the median is still
+technically significant (p=0.0003, driven by n=107's statistical power more than a large real effect), but
+the decisive test was practical, not just statistical: swept correction magnitudes from 0 to -2.24 (the
+calibration-fit constant) and scored each against VALIDATION-period MAE, the same real-accuracy standard
+already used to reject the median-of-3-years and logit-rookie-curve ideas. Result: the MAE-minimizing shift
+on held-out data is ~0 (best around -0.2, barely distinguishable from no correction at all), and MAE gets
+monotonically WORSE the larger the correction gets (3.077 uncorrected -> 3.458 at the full calibration
+constant) - the opposite of what would justify shipping a fix. **No correction shipped.** This is a clean,
+honest confirmation that the GBM durability model replacement already resolved the real, broad-based bias the
+old linear formula had; what's left in the extreme top tier is real but unpredictable tail risk (a handful of
+genuinely unforeseeable season-wrecking injuries among otherwise-healthy players), which the Monte Carlo
+simulation's residual-based variance is already the right tool for (it's designed to show this kind of
+downside risk in the distribution, not something a point-estimate shift should try to chase away) - not a
+gap in the point estimate itself.
+

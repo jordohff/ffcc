@@ -29,6 +29,7 @@ from ffmodel.season import (
     add_prior_starter_season_flag,
     add_recent_injury_history_flag,
     apply_current_team_from_sleeper,
+    apply_depth_chart_team_fallback,
     apply_qb_backup_games_est,
     apply_qb_role_upgrade_boost,
     apply_qb_starter_floor,
@@ -40,6 +41,7 @@ from ffmodel.season import (
     build_rookie_training_table,
     build_weekly_matchups,
     apply_team_opportunity_cap,
+    apply_unrostered_games_est,
     build_season_training_table,
     build_team_offense_summary,
     compute_defense_strength,
@@ -220,6 +222,19 @@ def main() -> None:
     n_mismatch = int(board["team_mismatch"].sum())
     if n_mismatch:
         print(f"  {n_mismatch} players had a stale nflverse team vs. Sleeper's current team - using Sleeper's")
+
+    n_before_depth_fallback = int(board["team"].isna().sum())
+    board = apply_depth_chart_team_fallback(board, depth_chart)
+    n_recovered = n_before_depth_fallback - int(board["team"].isna().sum())
+    if n_recovered:
+        print(f"  {n_recovered} players had no team in nflverse or Sleeper but were recovered "
+              f"from the live depth chart (very recent signings)")
+
+    n_unrostered = int(board["team"].isna().sum())
+    if n_unrostered:
+        print(f"  {n_unrostered} players have no current team resolved by any source - "
+              f"applying a validated unrostered-veteran games_est")
+    board = apply_unrostered_games_est(board)
 
     # sos_pts_allowed_pg above was computed from the pre-Sleeper (nflverse)
     # team, so a player whose nflverse team was stale (e.g. still showing

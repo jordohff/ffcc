@@ -1953,6 +1953,123 @@ def apply_current_team_from_sleeper(board: pd.DataFrame, sleeper_players: pd.Dat
     return board
 
 
+def apply_depth_chart_team_fallback(board: pd.DataFrame, depth_chart: pd.DataFrame) -> pd.DataFrame:
+    """Fill any `team` still null after apply_current_team_from_sleeper from
+    the live current-season depth chart, when it has one.
+
+    Found 2026-08-29 while root-causing WHY 58 players end up with no
+    resolvable team (see apply_unrostered_games_est) - checked whether that
+    population was really all genuinely-unrostered players (verified several
+    via web search: Nick Chubb retired, Hopkins/Lockett/Ekeler are real
+    free agents - `team=NaN` is correct for all of them) or partly a data-
+    freshness gap. It's both: 11 of the 58 DO have a team in
+    current_depth_chart (a live, frequently-refreshed feed) despite being
+    absent from both nflverse's rosters pull AND Sleeper's player list -
+    e.g. Najee Harris, confirmed via web search to have signed a one-year
+    deal with the Giants in August 2026, so recently that neither of the
+    other two sources had caught up yet, but the depth chart already listed
+    him at RB, pos_rank 3, team NYG. Depth chart's own `team` column already
+    uses the same standard codes as everywhere else in this pipeline (ARI/
+    LA/LAC/LV, not the AZ/GNB-style variants some other nflverse tables use)
+    so no TEAM_CODE_FIXES-style normalization is needed here.
+
+    Applied as a THIRD tier after nflverse (periodic) and Sleeper (live but
+    still has real gaps) - the depth chart update cadence is the fastest of
+    the three, catching very recent signings the other two haven't reflected
+    yet. Deliberately only fills remaining nulls, never overrides an
+    existing team - Sleeper stays authoritative when it has an answer, same
+    precedence rule apply_current_team_from_sleeper already established for
+    nflverse vs. Sleeper.
+    """
+    depth_team = (
+        depth_chart[["gsis_id", "team"]]
+        .dropna(subset=["gsis_id"])
+        .drop_duplicates(subset="gsis_id")
+        .rename(columns={"gsis_id": "player_id", "team": "depth_chart_team"})
+    )
+    board = board.merge(depth_team, on="player_id", how="left")
+    board["team"] = board["team"].fillna(board["depth_chart_team"])
+    return board.drop(columns=["depth_chart_team"])
+
+
+UNROSTERED_GAMES_EST = {"injured": 4.27, "healthy": 5.68}
+"""Direct-replacement games_est for a veteran with NO current team resolved
+by either nflverse or Sleeper (`team` still null after
+apply_current_team_from_sleeper) - split by whether their prev_games_played
+was <8 ("injured" - a real recent injury plausibly explains why no team has
+signed them yet) or >=8 ("healthy" - no obvious injury explanation, an even
+stronger signal the market has passed on them). See
+apply_unrostered_games_est's docstring for the full derivation.
+"""
+
+
+def apply_unrostered_games_est(board: pd.DataFrame) -> pd.DataFrame:
+    """REPLACE games_est for any veteran with no current team resolved by
+    either data source (`team` is null) - the durability model has no
+    roster-status signal at all (DURABILITY_FEATURES is built entirely from
+    trailing performance/health stats), so a player who is genuinely
+    unrostered gets a games_est as if they were a normal veteran with that
+    same trailing history, with no awareness that they don't currently have
+    a job to show up for at all.
+
+    Found 2026-08-28, investigating Tyreek Hill specifically (`team` null,
+    games_est 7.31 from the GBM base model using his real 2025 history -
+    prev_games_played=4, from a Week 4 dislocated knee/multi-ligament tear).
+    Verified the real situation via web search before assuming anything:
+    Miami actually released him (not just an unresolved data gap - he
+    genuinely has no team), and as of the most recent reporting he still
+    has "no power" in his leg with no set 2026 timeline - `team` being null
+    is CORRECT here, not a bug. The real question was whether games_est
+    should be lower given he currently has no job to report to at all, a
+    signal the model has no way to see.
+
+    Tested this directly and generally (58 players on the current board
+    share this null-team situation, not just Hill) using the same
+    contemporaneous-depth-chart methodology already validated elsewhere in
+    this pipeline (role security discount, QB backup games_est) as a real
+    historical proxy for "had no team at this point in the year": for
+    2019-2024, checked whether a player being ABSENT from every team's real
+    week-1/2 depth chart - despite having enough trailing history to get a
+    real games_est from the base model - predicts a bias beyond what the
+    model (which has no roster-status feature) already accounts for.
+
+    Result: a real, large, and NOT position/injury-specific effect.
+    Unrostered-with-recent-injury (prev_games_played<8, Hill's shape):
+    mean games_resid -1.82 (p<0.0001, n=256) - real actual games played
+    averaged only 4.27, not the ~7 the trailing-stats-only model gives.
+    Unrostered-but-otherwise-healthy (prev_games_played>=8, e.g. an aging
+    veteran cut with no obvious injury): mean games_resid -2.96 (p<0.0001,
+    n=216) - actually a LARGER effect - real mean games played only 5.68,
+    despite games_est built from a normal recent health record. Makes
+    sense: a player who was healthy last year but is STILL unsigned has an
+    even stronger "the market has moved on" signal than an injured one,
+    since there's no obvious injury to explain the gap.
+
+    Calibrated (2019-2021) and validated (2022-2024) separately for both
+    buckets - both replicate cleanly out of sample (injured: 4.63 vs 3.96
+    actual games; healthy: 5.65 vs 5.70 - both p<1e-7 in both halves). This
+    is a REPLACEMENT (not an additive patch, matching the role-upgrade-
+    durability precedent) because the player's own trailing stats are
+    genuinely uninformative here - what actually matters is roster status,
+    which DURABILITY_FEATURES has no way to see at all, the same
+    "replace, don't patch a structurally uninformative base" reasoning
+    already established for the role-upgrade durability fix.
+
+    Applied to EVERY unrostered veteran (not just Hill), regardless of
+    position - the underlying mechanism (no roster = no path to games,
+    whatever the reason) isn't position-specific. Naturally a no-op for
+    rookies (who always resolve to their real draft-team) and for any
+    veteran who DOES have a team, so no new gate is needed beyond checking
+    `team.isna()`.
+    """
+    board = board.copy()
+    unrostered = board["team"].isna()
+    bucket = np.where(board["prev_games_played"] < 8, UNROSTERED_GAMES_EST["injured"], UNROSTERED_GAMES_EST["healthy"])
+    board.loc[unrostered, "games_est"] = bucket[unrostered]
+    board["total_points_pred"] = board["ppg_pred"] * board["games_est"]
+    return board
+
+
 def evaluate_rankings(
     df: pd.DataFrame,
     actual_col: str = "total_points",
