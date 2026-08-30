@@ -35,6 +35,7 @@ from ffmodel.season import (
     apply_qb_starter_floor,
     apply_role_security_discount,
     apply_role_upgrade_durability_boost,
+    apply_te_elite_usage_durability_boost,
     build_enriched_weekly,
     build_head_coach_history,
     build_prediction_features,
@@ -169,7 +170,8 @@ def main() -> None:
     vet_board = vet_board[
         ["player_id", "player_display_name", "position", "team", "age", "team_changed",
          "new_head_coach", "new_hc_prior_team_ppg", "prev_snap_share_trend", "prev_snap_share_level",
-         "cap_percent", "sos_pts_allowed_pg", "ppg_pred", "games_est", "total_points_pred", "prev_games_played"]
+         "cap_percent", "sos_pts_allowed_pg", "ppg_pred", "games_est", "total_points_pred", "prev_games_played",
+         "wavg_target_share"]
     ]
     vet_board["is_rookie"] = 0
     print(f"  {len(vet_board):,} returning players projected")
@@ -200,6 +202,10 @@ def main() -> None:
     # makes apply_qb_role_upgrade_boost's prev_games_played<8 check a no-op
     # for rookies (they're handled by the separate rookie curve entirely).
     rookie_board["prev_games_played"] = pd.NA
+    # No prior NFL season exists for a true rookie - NaN here correctly
+    # makes apply_te_elite_usage_durability_boost's wavg_target_share gate a
+    # no-op for rookies (they're handled by the separate rookie curve).
+    rookie_board["wavg_target_share"] = pd.NA
     # Unlike snap share/contract history, SOS only needs (team, season,
     # position) - not the player's own prior-season history - so it applies
     # to rookies just as well as veterans (rookies already have a team from
@@ -210,7 +216,7 @@ def main() -> None:
         ["player_id", "player_display_name", "position", "team", "age", "team_changed",
          "new_head_coach", "new_hc_prior_team_ppg", "prev_snap_share_trend", "prev_snap_share_level",
          "cap_percent", "sos_pts_allowed_pg", "ppg_pred", "games_est", "total_points_pred", "is_rookie",
-         "ppg_outcome_low", "ppg_outcome_high", "prev_games_played"]
+         "ppg_outcome_low", "ppg_outcome_high", "prev_games_played", "wavg_target_share"]
     ]
     print(f"  {len(rookie_board):,} rookies projected")
 
@@ -275,6 +281,7 @@ def main() -> None:
     board = add_prior_starter_season_flag(board, season_stats, args.draft_season)
     board = apply_qb_role_upgrade_boost(board)
     board = apply_role_upgrade_durability_boost(board)
+    board = apply_te_elite_usage_durability_boost(board)
 
     oc_path = COACHING_DIR / f"offensive_coordinators_{args.draft_season}.csv"
     if oc_path.exists():

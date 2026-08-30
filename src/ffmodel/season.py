@@ -70,6 +70,7 @@ COMMON_VET_FEATURES = [
     "new_head_coach",
     "new_hc_prior_team_ppg",
     "cap_percent",
+    "cap_percent_pos_rank",
     "sos_pts_allowed_pg",
 ]
 
@@ -202,13 +203,39 @@ def flag_injury_affected_weeks(injuries: pd.DataFrame) -> pd.DataFrame:
     was Questionable or Doubtful for the same body part in both this week
     and the week before (consecutive weeks, same season).
 
+    2026-08-29 postscript: this function briefly grew a broader version
+    (is_hurt including "Out", adjacency tolerating a skipped bye week) after
+    the Garrett Wilson investigation found a real, verified case it missed.
+    That broadened version was REVERTED the same day after a more rigorous
+    test - predicting each affected player's REAL NEXT-SEASON ppg (not just
+    a single-season Spearman snapshot) across 15+ years, n=720 affected
+    player-seasons - found no position with a statistically significant
+    benefit and WR showing significant HARM (p=0.0037, chain-fix MAE 2.295
+    -> 2.391), TE trending harmful (p=0.13, underpowered). Removing games
+    from a trailing average always adds variance from a smaller sample; that
+    cost apparently outweighs the bias-correction benefit here, and a real
+    injury may also carry forward-looking risk that shouldn't be fully
+    erased from the signal. Reverted to this original, narrower, and (by
+    the same absence-of-evidence-for-harm standard) not-clearly-harmful
+    form. The Wilson case that motivated the broadening was a real,
+    individually-verified anecdote - it just didn't generalize into a
+    validated population-level improvement, the same lesson this project
+    has hit before with plausible-sounding, narrowly-tested ideas (see the
+    reverted age x elite interaction, QB streaming multiplier, and general
+    games_est shrinkage). Lesson for future injury/durability feature work:
+    validate against real NEXT-SEASON outcomes pooled across many years,
+    not a single test season's rank correlation - the latter is too coarse
+    and noisy to catch a real but modest harm like this.
+
     Deliberately requires 2+ consecutive weeks of the SAME body part, not
     just any single injury-report appearance - a one-off Friday game-time-
-    decision tag that resolves by itself is normal and shouldn't suppress a
-    whole season's numbers; a nagging issue a player is visibly playing
-    through week after week is what we actually want to catch. The week
-    that starts a 2-week streak already counts (it's the second consecutive
-    week of the same issue), not just later weeks in a longer streak.
+    decision tag that resolves by itself is normal and shouldn't suppress a whole
+    season's numbers; a nagging issue a player is visibly playing through
+    week after week is what we actually want to catch.
+
+    The week that starts a 2-week streak already counts (it's the second
+    consecutive week of the same issue), not just later weeks in a longer
+    streak.
     """
     reports = (
         injuries.dropna(subset=["gsis_id"])
@@ -246,6 +273,30 @@ def aggregate_healthy_season_stats(enriched_weekly: pd.DataFrame, injuries: pd.D
     drag down the historical signal fed to the model (see
     add_weighted_history_features, which uses this as the source for rate
     stats specifically, NOT for games played/durability).
+
+    2026-08-29 postscript - a REJECTED idea, kept here so it isn't
+    re-attempted the same way: built and briefly shipped `flag_return_from_
+    absence_weeks`, which additionally excluded a player's FIRST game back
+    after a real 3+-week injury absence (motivated by Garrett Wilson, then
+    "validated" via a peer-reviewed study, two verified 2025 anecdotes -
+    Joe Burrow, Jayden Daniels - and an end-to-end backtest showing QB/TE
+    Spearman improve when applied to all four positions). All of that
+    looked like real support. It was reverted the same day after a more
+    decisive test: predicting each affected player's REAL NEXT-SEASON ppg
+    (not the single test-season Spearman used to "validate" it), pooled
+    across 15+ years (n=858 return-from-absence player-seasons) - this
+    exclusion made the resulting trailing average a WORSE predictor of next
+    season, not better (MAE 2.415 -> 2.476 pooled, p=0.002). Concretely
+    wrong for Brock Bowers specifically: his flagged "return game" (2025
+    wk9, after a real knee absence) was his BEST game of the season, and
+    the mechanism blindly excluded it regardless of outcome, directly
+    contradicting the premise that a return game understates true talent.
+    Root cause of why the earlier validation missed this: removing a game
+    from a trailing average always adds variance from a smaller sample, and
+    a persisting injury may carry real forward-looking risk that shouldn't
+    be fully erased from the signal - neither cost showed up in a same-
+    season, same-player residual check or a single test-season rank
+    correlation, only in a real, pooled, next-season prediction test.
     """
     flags = flag_injury_affected_weeks(injuries)
     healthy = enriched_weekly.merge(flags, on=["player_id", "season", "week"], how="left")
@@ -400,9 +451,33 @@ def add_contract_signal_features(table: pd.DataFrame, contract_history: pd.DataF
     contract reflects the team's own belief in a player's role security
     (and gives them less incentive to bench/replace him), which can matter
     independent of last season's raw stat line.
+
+    Also adds `cap_percent_pos_rank`: cap_percent's PERCENTILE RANK within
+    the same season+position, alongside the raw value rather than replacing
+    it. Added 2026-08-29 after the user asked to test whether contract share
+    of cap correlates with real usage BY POSITION, specifically because RBs
+    and TEs are paid far less than QBs/WRs in absolute cap-share terms (a
+    real, confirmed scale gap: median cap_percent by position is QB 0.035,
+    WR 0.006, TE 0.006, RB 0.005 - QB's median alone is ~6x every other
+    position's) - a raw dollar-share threshold that reads as "a real
+    investment" for a QB may be unremarkable for an RB, and vice versa.
+    Verified real, same-season correlation with actual usage (season snap
+    share, 2010-2025, n=1174-2200 per position) BEFORE adding this as a
+    feature: raw cap_percent already correlates positively at every
+    position (r=0.39-0.51), but the WITHIN-POSITION percentile rank
+    correlates MORE STRONGLY at every position too (QB 0.388->0.434, RB
+    0.508->0.544, WR 0.489->0.617 - the biggest gain, TE 0.511->0.571) -
+    real evidence the position-relative framing captures the signal better,
+    not just a theoretical fix. Motivated by Kenneth Walker III's 2026 move
+    to KC on a $45M free-agent deal (the richest FA RB contract in NFL
+    history per contemporaneous reporting) - his RAW cap_percent (0.019 in
+    2026, backloaded like most modern contracts) looks unremarkable next to
+    a QB's typical share, but should rank near the very top of the REAL RB
+    contract market that season.
     """
     table = table.merge(contract_history, on=["player_id", "season"], how="left")
     table["cap_percent"] = table["cap_percent"].fillna(0)
+    table["cap_percent_pos_rank"] = table.groupby(["season", "position"])["cap_percent"].rank(pct=True)
     return table
 
 
@@ -1241,12 +1316,65 @@ elite x recent-injury INTERACTION (wavg_ppg combined with a low
 prev_games_played) that GBM needs the freedom to learn, not a flat rule.
 """
 
+DURABILITY_USAGE_FEATURE = "wavg_target_share"
+DURABILITY_USAGE_POSITIONS = {"RB", "TE"}
+"""RB/TE-only addition to the durability feature set, appended after the
+base DURABILITY_FEATURES. Added 2026-08-29 investigating Brock Bowers: the
+GBM's elite-talent detection runs off wavg_ppg, but a high-volume, catch-
+heavy TE's raw half-PPR ppg can look unremarkable even when his real
+opportunity (target share) is elite - Bowers' own wavg_ppg (~9.1) doesn't
+read as elite despite a 92% snap share and a real target-hog role, which
+plausibly explains why the "elite player, clean recovery from a real
+injury" pattern the GBM is supposed to rediscover (see fit_durability_
+models_by_position's docstring) doesn't fire for a case like his.
 
-def make_durability_pipeline() -> Pipeline:
+Tested (not assumed) before shipping, same rigor established earlier this
+session (multi-season walk-forward, not a single test-season snapshot):
+across 6 independent test seasons (2020-2025), adding wavg_target_share to
+the durability feature set improved MAE for RB (3.363->3.341) and TE
+(3.075->3.062), was flat for QB (3.054->3.053, no signal - target_share
+isn't a meaningful concept for a passer), and was slightly WORSE for WR
+(3.164->3.172, small but consistently in the wrong direction) - directly
+matching this session's "don't blanket, check by position" rule, so this
+is RB/TE only, not all four positions.
+
+Also tested directly on the narrow cohort this is actually meant to help
+(elite usage - top-quartile wavg_target_share within position - AND a
+recent short season, prev_games_played<14, Bowers' exact profile): the
+BASE model currently under-predicts this cohort's real games_played by a
+real, systematic margin (RB resid +0.77, TE resid +1.79 games - the model
+is too conservative specifically here); adding wavg_target_share narrows
+both gaps (RB resid +0.77->+0.63, TE resid +1.79->+1.66) - real, if
+modest, movement in the right direction. WR's OWN cohort residual was
+already near zero either way (-0.03 to -0.06), consistent with WR not
+needing this signal - the base model isn't miscalibrated for high-usage
+WRs the way it is for RB/TE.
+"""
+
+
+def make_durability_pipeline(mono_cst: list[int] | None = None) -> Pipeline:
     """GBM pipeline for durability (real games_played) prediction."""
     return Pipeline([("impute", SimpleImputer(strategy="median")),
                       ("gbm", HistGradientBoostingRegressor(max_depth=3, random_state=42,
-                                                             monotonic_cst=DURABILITY_MONOTONIC_CST))])
+                                                             monotonic_cst=mono_cst or DURABILITY_MONOTONIC_CST))])
+
+
+def durability_features_for_position(position: str) -> list[str]:
+    """DURABILITY_FEATURES, plus DURABILITY_USAGE_FEATURE for RB/TE only -
+    see DURABILITY_USAGE_POSITIONS' docstring for why this is position-
+    gated rather than shared across all four positions."""
+    if position in DURABILITY_USAGE_POSITIONS:
+        return DURABILITY_FEATURES + [DURABILITY_USAGE_FEATURE]
+    return DURABILITY_FEATURES
+
+
+def durability_monotonic_cst_for_position(position: str) -> list[int]:
+    """DURABILITY_MONOTONIC_CST, extended with an unconstrained (0) slot for
+    DURABILITY_USAGE_FEATURE when it's included - see durability_features_
+    for_position."""
+    if position in DURABILITY_USAGE_POSITIONS:
+        return DURABILITY_MONOTONIC_CST + [0]
+    return DURABILITY_MONOTONIC_CST
 
 
 def fit_durability_models_by_position(train: pd.DataFrame) -> dict[str, Pipeline]:
@@ -1335,11 +1463,12 @@ def fit_durability_models_by_position(train: pd.DataFrame) -> dict[str, Pipeline
     """
     models = {}
     for position in POSITION_VET_FEATURES:
-        pos_train = train[train["position"] == position].dropna(subset=DURABILITY_FEATURES + ["games_played"])
+        feats = durability_features_for_position(position)
+        pos_train = train[train["position"] == position].dropna(subset=feats + ["games_played"])
         if pos_train.empty:
             continue
-        pipeline = make_durability_pipeline()
-        pipeline.fit(pos_train[DURABILITY_FEATURES], pos_train["games_played"].clip(upper=17))
+        pipeline = make_durability_pipeline(durability_monotonic_cst_for_position(position))
+        pipeline.fit(pos_train[feats], pos_train["games_played"].clip(upper=17))
         models[position] = pipeline
     return models
 
@@ -1354,7 +1483,8 @@ def predict_durability(models: dict[str, Pipeline], rows: pd.DataFrame, max_game
         mask = rows["position"] == position
         if not mask.any() or position not in models:
             continue
-        preds.loc[mask] = np.clip(models[position].predict(rows.loc[mask, DURABILITY_FEATURES]), 0, max_games)
+        feats = durability_features_for_position(position)
+        preds.loc[mask] = np.clip(models[position].predict(rows.loc[mask, feats]), 0, max_games)
     return preds
 
 
@@ -2535,6 +2665,79 @@ def add_prior_starter_season_flag(board: pd.DataFrame, season_stats: pd.DataFram
     )
     board = board.merge(had_starter_season, on="player_id", how="left")
     board["had_real_starter_season"] = board["had_real_starter_season"].fillna(False).astype(bool)
+    return board
+
+
+TE_ELITE_USAGE_THRESHOLD = 0.125
+"""75th-percentile wavg_target_share within TE, computed from the full
+2010-2025 training history (not the live board's own distribution, to stay
+leak-safe) - the "elite usage" gate for apply_te_elite_usage_durability_
+boost."""
+
+TE_ELITE_USAGE_RECENT_INJURY_GAMES_BOOST = 1.05
+"""Additive games_est boost for TE only - see apply_te_elite_usage_
+durability_boost's docstring for derivation and validation."""
+
+
+def apply_te_elite_usage_durability_boost(board: pd.DataFrame) -> pd.DataFrame:
+    """ADD a games_est boost for TE with elite target share
+    (wavg_target_share >= TE_ELITE_USAGE_THRESHOLD) AND a recent short
+    season (prev_games_played < 14) - a real, validated gap the GBM
+    durability model's own usage-aware feature set (see DURABILITY_USAGE_
+    FEATURE) only partially closes.
+
+    Found 2026-08-29 investigating Brock Bowers, user-flagged as ranked
+    "several rounds past when he's going" in real fantasy markets. Adding
+    wavg_target_share to the GBM's own feature set (see DURABILITY_USAGE_
+    POSITIONS) was a real, validated improvement, but checking the SAME
+    elite-usage-plus-recent-injury cohort afterward found it only narrowed
+    the systematic under-prediction (TE resid +1.79 -> +1.66 games), not
+    closed it - the GBM, even with the richer feature set, isn't fully
+    learning this specific interaction, plausibly because the cohort is
+    small (n=72 pooled TE-seasons across 11 seasons, 2015-2025) relative to
+    what a tree ensemble needs to isolate a clean interaction reliably.
+
+    Tested as a LAYERED, board-time correction instead (the same pattern
+    already established for role-transition fixes like apply_role_upgrade_
+    durability_boost, applied on top of the GBM base prediction rather than
+    folded into its training) - walk-forward calibrated (2015-2020) and
+    validated (2021-2025) on the residual AFTER the usage-aware GBM's own
+    prediction, to avoid double-counting: validation-period uncorrected
+    mean residual +1.104 games (p=0.11, real but not yet significant alone)
+    -> CORRECTED mean residual +0.091 games (p=0.89) after applying the
+    calibration-period boost - lands almost exactly on zero out of sample,
+    a clean validation.
+
+    Tested the SAME cohort definition for RB too (paired with the same
+    DURABILITY_USAGE_POSITIONS gate) and explicitly REJECTED it there:
+    the calibration-period boost (-0.497, not even significant, p=0.38)
+    doesn't match the sign validation actually needs, and applying it makes
+    the validation-period residual WORSE, not better (+1.405 -> +1.902) -
+    matches this session's established "don't blanket, check by position"
+    rule. TE-only.
+
+    Directly answers the user's standing worry about durability being
+    over-punished: this is a narrow, evidenced correction to one specific,
+    validated gap - NOT a broad "durability is too hard to predict, assume
+    everyone plays" argument, which was tested and explicitly rejected
+    earlier in this project (assuming every starter plays a full season is
+    measurably worse than the model's own estimate, MAE 3.74 vs 2.94).
+
+    Verified on Brock Bowers specifically: real 2025 PCL sprain + bone
+    bruise (Week 1, missed ~5-6 games), reported "100 percent" recovered
+    for 2026 training camp per multiple sources - exactly the "elite
+    player, real injury, clean recovery" profile this correction targets.
+    His wavg_target_share (0.244, 98.6th percentile among 2026 TEs) clears
+    the elite-usage bar comfortably.
+    """
+    board = board.copy()
+    gate = (
+        (board["position"] == "TE")
+        & (board["wavg_target_share"] >= TE_ELITE_USAGE_THRESHOLD)
+        & (board["prev_games_played"] < 14)
+    )
+    board.loc[gate, "games_est"] = (board.loc[gate, "games_est"] + TE_ELITE_USAGE_RECENT_INJURY_GAMES_BOOST).clip(upper=17)
+    board["total_points_pred"] = board["ppg_pred"] * board["games_est"]
     return board
 
 

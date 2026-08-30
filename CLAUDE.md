@@ -3117,3 +3117,351 @@ simulation's residual-based variance is already the right tool for (it's designe
 downside risk in the distribution, not something a point-estimate shift should try to chase away) - not a
 gap in the point estimate itself.
 
+
+
+### 2026-08-29 (cont'd) - Garrett Wilson case: found and fixed a real bug in the injury-affected-week flag
+
+User's broader worry after the last round of fixes: "we're not getting durability type items right and it is
+improperly discounting players we should be higher on," pointing to Garrett Wilson as an example (same case
+flagged but not investigated on 2026-08-27). Investigated concretely rather than reacting to the general
+worry in the abstract.
+
+**Root cause, verified before assuming anything.** Wilson's 2025 weekly_stats shows only 7 real games (weeks
+1-6, then week 10 at 0.0 points, nothing after). Verified via web search: real knee injury - Doubtful wk7,
+Out wk8, returned wk10 after the bye and immediately re-aggravated it (0.0 points that game), shut down for
+the year. Fully healthy and cleared for 2026 training camp per July reporting; considered a top-15-ish WR by
+outside analysts. His wk10 0.0-point game - clearly a "played hurt, understates true talent" week, exactly
+what `flag_injury_affected_weeks`/`aggregate_healthy_season_stats` exists to exclude from trailing rate
+stats - was NOT being excluded. Traced the real injury report (`injuries.parquet`): Doubtful(wk7,Knee) ->
+Out(wk8,Knee) -> [bye wk9] -> Questionable(wk10,Knee). Two independent bugs in the flagging logic broke the
+chain: (1) `is_hurt` only counted Questionable/Doubtful, so wk8's "Out" didn't count as continuing the injury
+at all - backwards, since Out is if anything a MORE serious signal than Questionable/Doubtful, not a reason
+to reset the streak; (2) adjacency required the literal next calendar week (`week == prev_week + 1`), so the
+wk9 bye broke continuity between wk8 and wk10 even though it's the same uninterrupted absence.
+
+**Checked real scope before shipping** (matching this project's standing practice): broadened `is_hurt` to
+include "Out" and relaxed adjacency to tolerate a gap of up to 2 weeks (covers exactly one bye, not an
+arbitrary gap that could bridge two unrelated same-body-part dings months apart). Raw flagged-row count
+roughly tripled (6,890 -> 18,118), but most of that is "Out" weeks getting flagged, which is a no-op (no stat
+line to exclude when a player didn't play). The real-world effect - weeks with an actual stat line AND a
+Questionable/Doubtful tag that are newly excluded - is 471 real player-weeks across 347 distinct players,
+2010-2025. Spot-checked the 2025-specific list against the current board: catches real, well-known 2025
+injury situations beyond just Wilson - Tee Higgins, Drake London, D'Andre Swift, Brian Thomas Jr., Rhamondre
+Stevenson, Marvin Harrison Jr., Rome Odunze, Chris Godwin, and more.
+
+**Re-ran the full walk-forward backtest before shipping**: flat/noise-level (QB 0.731->0.728, RB
+0.796->0.797, TE 0.815->0.813, WR 0.818->0.818 Spearman; the small top-24-hit-rate dips at RB/WR are single-
+player flips in a 24-player cutoff for one test season, not a real signal). No regression - shipped.
+
+**Verified on Wilson specifically**: ppg_pred 9.92 -> 10.27, games_est 12.63 -> 12.97, total_points_pred
+125.25 -> 133.20, position_rank 28 -> 24 (now inside a startable WR2 range), VBD 9.83 -> 17.08 - a real,
+mechanically-justified improvement. **Honestly incomplete, not fully resolved**: his wk6 game (1.3 points,
+plausibly when the injury actually happened mid-game) has NO injury-report entry at all for that week - the
+official Friday report only started tracking him from wk7 - so it can't be caught by this or any report-based
+mechanism. This is the same class of gap already documented for the CeeDee Lamb 2024 case (the injury report
+tracks "will they play," not "are they compromised," and doesn't retroactively flag the week an injury
+actually occurred) - a real, known, data-availability limit, not something left unfixed by oversight. Both
+boards regenerated with the fix.
+
+
+
+### 2026-08-29 (cont'd) - return-from-absence exclusion (RB/WR only), and an honest QB power gap left open
+
+User asked to keep digging for Wilson-shaped cases rather than stop at the one fix. Scanning the board for
+players with a partial 2025 season and a game well below their own median surfaced a distinct, broader
+pattern beyond the chain-continuity bug just fixed: a player's FIRST game back after a real 3+-week injury
+absence often underperforms their own established rate, even when that return game gets no fresh
+Questionable/Doubtful tag at all (so flag_injury_affected_weeks structurally can't catch it - it only looks
+at the calendar week's own report status).
+
+**User's explicit instruction mid-investigation: "we have to get this right, verify with multiple sources."**
+Cross-checked the general phenomenon against a peer-reviewed source (PMC, "The Use of Fantasy Points to
+Evaluate Return-to-Play Performance After Time-Loss Injuries in the National Football League") - found -0.50
+ppg overall, largest at QB (-1.95) and WR (-0.33) - independently confirms the pattern exists in real NFL
+data, not just this project's own numbers. Verified two concrete 2025 anecdotes via web search rather than
+trusting the raw data alone: Joe Burrow's 9-game turf-toe absence and week 13-15 return window matched
+exactly; Jayden Daniels' flagged week 14 (2.72 pts on his own 17.74 median) turned out to be even more
+direct than "rust" - he re-injured the SAME elbow mid-game on a tackle attempt and was pulled from a 31-0
+loss, fully explaining the score.
+
+**User's second pushback, also correct and directly acted on: "we can't just blanket this stuff, everyone's
+games played and situations can be different."** Was about to apply this as one flat rule across all
+positions - stopped and tested position-specific MAE improvement (calibrate <=2020, validate >2020) instead
+of assuming the pooled signal generalizes. Real, validated split: RB holds up (mean resid -0.87, p=0.05,
+MAE 3.92->3.68 on held-out data, still significant in just the shortest 3-4-week-gap cohort, p=0.002); WR
+is real but weaker (MAE 3.72->3.60, short-gap cohort p=0.003, though the full validation split alone is
+p=0.14); TE shows literally nothing at any cut (validation mean resid -0.09, p=0.86 - statistically zero,
+not just "not significant"). Also confirmed this isn't just re-solving the already-shipped chain-fix: of 970
+real RB/WR return-from-absence candidates (2010-2025), 681 (70%) are genuinely new exclusions.
+
+Shipped `flag_return_from_absence_weeks` (season.py), gated to RB/WR only via `RETURN_FROM_ABSENCE_
+POSITIONS`, wired into `aggregate_healthy_season_stats` alongside the existing chain-based flag. Re-ran the
+full backtest before trusting it: QB and TE Spearman came back BYTE-IDENTICAL to the pre-fix run (0.728399
+and 0.813104 to six decimals) - direct confirmation the position-gating works exactly as designed, zero
+leakage into untouched positions. RB/WR moved within noise (RB 0.797->0.793, WR 0.818->0.820). Ran the whole
+pipeline twice end to end per the user's request to confirm stability - both runs produced byte-identical
+backtest numbers, fully deterministic.
+
+**QB - user pushed back a third time ("are we sure we shouldn't ship QB-specific scenarios?") and this
+pushback caught a real analysis error, not just a disagreement.** Re-examined rather than defending the
+original call: QB's own test (n=116, the smallest of the four positions by a wide margin) showed mean resid
+-0.99 with a 95% CI of [-2.47, +0.49] - THAT INTERVAL FULLY CONTAINS the published study's -1.95 ppg QB
+estimate. Computed the minimum detectable effect at 80% power for this sample size: 2.11 ppg, larger than
+what was even observed. **The earlier "QB shows no signal" framing was wrong**: QB's test was genuinely
+UNDERPOWERED, not evidence of a null effect. Real, structural reason for the smaller QB sample: there are
+only 32 starting jobs league-wide and a QB who misses 3+ weeks is often permanently replaced by a backup for
+the rest of the season rather than returning himself, so real "same-QB return from a real absence" events are
+inherently rarer than the equivalent RB/WR events.
+
+**User pushed a fourth time ("I still think we should be utilizing for all scenarios, not ruling out on
+position") - re-checked TE with the same rigor just applied to QB rather than treating TE's earlier
+validation-split result as settled.** TE's validation-SPLIT estimate (-0.09, which looked like a clean zero)
+turned out to be a smaller, noisier slice of a fuller story: the full POOLED sample (n=256, all seasons, not
+just the >2020 validation half) gives mean -0.29 with 95% CI [-0.82, +0.24] - a tighter interval than QB's
+(more data, smaller intrinsic variance), but still genuinely unable to rule out a real, modest effect. Same
+underpowered shape as QB, not a confirmed null.
+
+**Decisive test: re-ran the actual end-to-end backtest (the 2025-holdout Spearman this project treats as its
+headline validation number everywhere else) with all four positions included, rather than continuing to argue
+from split-sample p-values alone.** Result: QB improved meaningfully (0.728->0.745), TE improved slightly
+(0.813->0.818), RB/WR unchanged (no logic difference for them - confirms this isn't just noise from touching
+unrelated code). No regression anywhere. **Shipped position-blind (`RETURN_FROM_ABSENCE_POSITIONS` includes
+all four positions)** - the real, trusted validation metric settled what the smaller split-sample tests
+couldn't. Ran the full pipeline twice end to end to confirm determinism before trusting any of this - both
+runs produced byte-identical backtest numbers to six decimals.
+
+Net lesson worth keeping: a "not significant" result from a SPLIT sample (calibrate/validate, which halves an
+already-modest n) can look like a confirmed null when it's really just underpowered - checking the full
+pooled estimate's confidence interval (not just its own split p-value) and, where possible, validating against
+the project's actual real-world backtest rather than stopping at a synthetic split test, is the more reliable
+way to tell the two apart. Both boards regenerated and verified deterministic (740 rows each, two identical
+runs, all four positions).
+
+
+
+### 2026-08-29 (cont'd) - REVERTED both injury-week-exclusion fixes: a real, decisive test the earlier validation missed
+
+User asked to look at Kenneth Walker III (team-change role increase) and Brock Bowers (ranked "several rounds
+past when he's going" per real market, specifically citing a Raiders insider quote about a record-breaking
+target-share plan). Investigating Bowers surfaced something much bigger than his own case.
+
+**Bowers' flagged "return game" (2025 wk9, after a real 4-week knee absence) was his BEST game of the season
+(31.3 pts) - and the return-from-absence exclusion shipped earlier today was blindly throwing it out
+regardless of outcome.** This directly contradicted the mechanism's own premise (a return game understates
+true talent) and was exactly the kind of situational blindness flagged earlier in the session ("everyone's
+situations can be different").
+
+**Built a genuinely decisive test rather than just patching Bowers' case: predict each affected player's REAL
+NEXT-SEASON ppg (not same-season residuals, not a single test-season Spearman snapshot) using three versions
+of the trailing average - no exclusion, chain-fix only, chain-fix + return-exclusion - pooled across 15+
+years.** Result, and it overturned both fixes shipped earlier today:
+- Return-from-absence exclusion: significantly WORSE at predicting real future ppg, both in its own target
+  population (n=858, MAE 2.415->2.476, p=0.002) and pooled across the whole dataset (n=4681, p=0.0007).
+- Chain-continuity fix (the Wilson "Out status + bye week" broadening): isolated to just the 720 player-
+  seasons it actually affects, WR shows significant harm (p=0.0037, MAE 2.295->2.391) and TE trends harmful
+  (p=0.13, underpowered); QB/RB are statistical noise either way. No position shows a validated benefit.
+
+**Root cause of why the earlier same-day validation missed this**: removing a game from a trailing average
+always adds variance from a smaller sample, and a persisting injury may carry real forward-looking risk that
+shouldn't be fully erased from the signal - neither cost is visible in a same-season residual check or a
+single test-season rank correlation, only in a real, pooled, next-season prediction test. **Reverted both**:
+removed `flag_return_from_absence_weeks` entirely, restored `flag_injury_affected_weeks` to its original
+narrow form (Questionable/Doubtful only, exact week+1 adjacency). Backtest returned to the EXACT pre-session
+baseline (QB 0.731231/RB 0.796325/TE 0.814827/WR 0.817914, matching to six decimals) - confirms the revert is
+clean. This is now the documented, generalizable lesson for all future durability/injury feature work in this
+project: validate against real next-season outcomes pooled across many years BEFORE shipping, not a single
+test season's rank correlation - the Wilson case that started both fixes was a real, individually-verified
+anecdote, it just never generalized into a validated population-level improvement (the same shape as the
+reverted age x elite interaction, QB streaming multiplier, and general games_est shrinkage).
+
+**Kenneth Walker III / team-changed role increases: real gap found, addressed via a different, validated
+route.** Verified his situation: signed a 3-year, $45M deal with KC (the richest FA RB contract in NFL history
+per contemporaneous reporting), fresh off Super Bowl MVP honors, specifically to upgrade a KC rushing attack
+that ranked 25th in yards/game. Dumped the fitted RB Ridge coefficients directly: `team_changed` = -1.27 ppg,
+a FLAT penalty applied identically whether a player lost his job and signed for scraps or, like Walker, signed
+a record deal to be a desperately-needed lead back - the model has no feature that distinguishes direction of
+a team change. `cap_percent` (already a contemporaneous, un-lagged feature - a contract is known at prediction
+time, unlike performance stats) should partly counteract this, but Walker's 2026 cap_percent is a modest 0.019
+(same real backloaded-contract structure documented elsewhere in this pipeline for big free-agent deals), which
+doesn't clear the same numeric bar as an established veteran's raw cap share.
+
+**User's specific ask: test whether contract share of cap correlates with usage, by position, since RBs/TEs
+are paid far less than QBs in raw terms.** Verified before building anything: real, significant same-season
+correlation between `cap_percent` and real usage (season snap share, 2010-2025) at every position (QB r=0.39,
+RB r=0.51, WR r=0.49, TE r=0.51), and the correlation gets STRONGER at every position when cap_percent is
+ranked WITHIN POSITION instead of used raw (QB 0.39->0.43, RB 0.51->0.54, WR 0.49->0.62 - the biggest gain,
+TE 0.51->0.57) - confirms the scale-difference concern is real, not just theoretical: median cap_percent by
+position is QB 0.035, WR/TE 0.006, RB 0.005 - a QB's MEDIAN contract share alone is ~6x every other position's,
+so a raw dollar-share threshold that reads as "a real investment" for a QB is unremarkable for an RB and vice
+versa.
+
+**Shipped `cap_percent_pos_rank`** (season.py, `add_contract_signal_features`) - cap_percent's percentile rank
+within the same season+position, added ALONGSIDE the raw value (not replacing it) to `COMMON_VET_FEATURES`.
+Validated with the rigor this session's revert just re-established: walk-forward tested across SIX independent
+test seasons (2020-2025, not just one), isolating this single feature's effect (with vs. without, same
+training data otherwise) - improved BOTH Spearman and MAE at every position, every season pooled: QB Spearman
+0.691->0.699 (MAE 4.021->3.988), RB 0.746->0.752 (MAE 2.630->2.587), TE 0.746->0.754 (MAE 1.557->1.556, near-
+flat but Spearman clearly better), WR 0.792->0.801 (MAE 2.123->2.082) - a real, broad, position-general
+improvement, not a single-season artifact. Real board effect: Kenneth Walker III's ppg_pred 9.81->10.56,
+overall rank 57->50, RB23->RB21, VBD 16.23->20.69 - his real, market-leading RB contract now counts for
+something instead of being swamped by the flat team_changed penalty.
+
+**Brock Bowers - diagnosed further, not yet fixed, flagged as an open next step.** His remaining gap traces to
+`games_est` (11.88, well below TE1 Trey McBride's 14.27) despite Bowers having the HIGHER snap share of the
+two (0.921 vs 0.918) - not a contract issue, since he's still on his rookie deal. Verified his real 2025
+injury via web search: a genuine, acute PCL sprain + bone bruise from a Week 1 hit, missed ~5-6 games, and is
+now reported "100 percent" for 2026 training camp with no lingering concerns - exactly the "elite player, real
+injury, clean recovery" pattern this project already built a mechanism for (the elite-recent-injury durability
+boost, since folded into the GBM durability model's own feature set). Hypothesis, not yet tested: the GBM's
+"elite talent" detection runs off `wavg_ppg`, and Bowers' own wavg_ppg (~9.1) doesn't read as elite in HALF-PPR
+terms even though his underlying USAGE (92% snap share, high target volume) clearly is - half-PPR compresses
+the value of a catch-volume-heavy TE relative to a big-play scorer, potentially masking his real elite-ness
+from any wavg_ppg-keyed "give this player durability leniency" logic. Not tested or shipped this session -
+flagged as the concrete next thing to check (does a usage-based elite-detection, e.g. target-share percentile
+instead of/alongside wavg_ppg, produce a validated durability benefit for this specific player profile).
+
+Both boards regenerated with the revert + the new cap_percent_pos_rank feature (740 rows each).
+
+
+
+### 2026-08-29 (cont'd) - usage-aware durability feature shipped (RB/TE only), Bowers gap partly closed, honestly not fully
+
+Followed up on the open Bowers hypothesis flagged at the end of the last entry: does the durability GBM's
+"elite talent" detection (keyed off wavg_ppg) miss a high-usage, catch-volume player whose raw half-PPR ppg
+doesn't read as elite even though his real opportunity (target share) clearly is?
+
+**Tested before shipping, same multi-season rigor this session re-established after the injury-flag revert.**
+Added `wavg_target_share` to the durability feature set and walk-forward tested across 6 independent seasons
+(2020-2025), by position: RB improved (MAE 3.363->3.341) and TE improved (3.075->3.062); QB was flat/no signal
+(3.054->3.053 - target share isn't a meaningful concept for a passer); WR was slightly WORSE (3.164->3.172,
+small but consistently wrong-direction). Also tested directly on the narrow cohort this is actually meant to
+help (top-quartile wavg_target_share within position AND a recent short season, prev_games_played<14 - Bowers'
+exact profile): the BASE model systematically under-predicts this cohort's real games_played (RB resid +0.77,
+TE resid +1.79 games), and adding wavg_target_share narrows both gaps (RB +0.77->+0.63, TE +1.79->+1.66) -
+real, if modest, movement in the right direction. WR's own cohort residual was already near zero either way,
+consistent with WR not needing this signal.
+
+**Shipped RB/TE only** (`DURABILITY_USAGE_FEATURE`/`DURABILITY_USAGE_POSITIONS` in season.py), matching this
+session's established "don't blanket, check by position" rule - required making the previously-flat, shared
+DURABILITY_FEATURES list position-aware (`durability_features_for_position`/`durability_monotonic_cst_for_
+position`), used by both `fit_durability_models_by_position` and `predict_durability` (and automatically by
+`compute_walk_forward_residuals`, which calls both). Verified on the real backtest: QB and WR Spearman came
+back BYTE-IDENTICAL to the pre-change run (0.732959 and 0.808578) - confirms clean position-gating, zero
+leakage into untouched positions; RB improved 0.798885->0.802010, TE improved 0.821432->0.825065.
+
+**Board effect on Bowers, reported honestly rather than oversold**: games_est 11.88->12.01 (+0.13, matching
+the small effect size found in testing - this was never going to be a full fix, just a validated, modest
+correction). His overall rank barely moved (66->65) because OTHER high-usage TEs (George Kittle, games_est
+12.67) picked up a similar boost from the same fix, raising the position's whole bar along with him - a real,
+honest side effect of a position-general (not player-targeted) correction. **The larger gap between Bowers'
+board position (65th, TE4) and his real 2026 market ADP (~pick 22-34, TE2) remains substantially open.** This
+session traced and fixed one real, validated, evidenced mechanism (durability under-crediting elite-usage-
+but-modest-raw-ppg players) but did not find or claim a full resolution - the remaining gap may be a genuine,
+harder question (does half-PPR structurally undervalue a catch-volume-over-efficiency TE profile relative to
+how real drafters value him, independent of any fixable model bug) worth a dedicated future investigation
+rather than force-fitting another correction onto one named player without equivalent evidence.
+
+Both boards regenerated (740 rows each) with all three of this session's validated changes: the injury-flag
+revert, cap_percent_pos_rank, and the RB/TE usage-aware durability feature.
+
+
+
+### 2026-08-29 (cont'd) - a real, layered TE durability boost, and closing the PPR/half-PPR anomaly
+
+User pushed to keep digging on Bowers specifically ("we need to figure out why we're so far off"), and
+separately re-raised the standing worry about durability being over-punished generally. Addressed both:
+confirmed directly (not just reasserted) that the BROAD version of that worry was already tested and
+rejected earlier in this project (assuming every starter plays a full season is measurably WORSE than the
+model's own estimate - MAE 3.74 vs 2.94) - what actually works is narrow, evidenced corrections, and this
+round found a real one.
+
+**Dumped Bowers'/McBride's/Kittle's full durability feature vectors side by side**: all three have nearly
+identical wavg_ppg (12.08-12.64 - genuinely clustered on talent), so the real driver of Bowers' games_est gap
+is wavg_games_played (13.875 vs McBride's near-perfect 16.7) - McBride simply has a cleaner recent health
+record. Re-checked the elite-usage+recent-injury TE cohort (already flagged as an open thread) after the
+usage-feature fix: the GBM, even with wavg_target_share included, still leaves a real, systematic ~1.66-game
+under-prediction for this cohort - only partially closed (was 1.79), not resolved. Plausible cause: the cohort
+is small (n=72 pooled TE-seasons across 11 years) - thin for a tree ensemble to isolate a clean interaction.
+
+**Tested a LAYERED, board-time correction on top of the GBM (same established pattern as apply_role_upgrade_
+durability_boost), not a bigger GBM feature-engineering push.** Walk-forward calibrated (2015-2020) and
+validated (2021-2025) on the residual AFTER the already-usage-aware GBM's own prediction, to avoid double-
+counting: TE validation-period residual went from +1.104 games uncorrected (p=0.11) to +0.091 corrected
+(p=0.89) - lands almost exactly on zero out of sample, a clean validation. Tested the identical cohort/
+methodology for RB too and explicitly REJECTED it there - the calibration-period sign doesn't even match what
+validation needs (applying it makes RB's validation residual WORSE, +1.405->+1.902) - matches this session's
+now-repeated "don't blanket, check by position" rule.
+
+**Shipped `apply_te_elite_usage_durability_boost`** (season.py) - TE only, gated on wavg_target_share >=0.125
+(the real 75th-percentile threshold within TE, computed from 2010-2025 history) AND prev_games_played<14,
+adding +1.05 games to games_est (the full-data pooled constant). Required adding `wavg_target_share` to the
+board's retained columns (it was being computed but dropped before this point in the pipeline) in both the
+vet and rookie board schemas (NaN for rookies, correctly making the gate a no-op for them).
+
+**Verified on Bowers**: games_est 12.01->13.06 (+1.05 exact), total_points_pred 116.23->126.39, overall rank
+65->59. George Kittle (also elite target share, also a recent short season) picked up the identical +1.05 and
+moved similarly (45), so the two moved together rather than Bowers closing ground on him specifically - an
+honest, expected side effect of a position-general (not player-targeted) fix.
+
+**User's continued, fair pushback ("still doesn't feel like a good enough change") led to finding one more
+real thing, not just reassurance: the PPR-board anomaly flagged two entries ago (Bowers ranking WORSE in PPR
+than half-PPR, which is backwards for a high-catch-volume player) was checked again on the freshly-rebuilt
+PPR board and is GONE** - it was a stale read from before this session's fixes (cap_percent_pos_rank and the
+TE durability work hadn't been applied to that PPR snapshot yet). On the current, fully-updated PPR board
+(the format closer to how real market ADP is typically quoted), Bowers is TE3, overall 47th - a real,
+substantial improvement from where the earlier snapshot had him (TE10, 88th). Real market ADP is ~pick 22-34
+- so a real gap remains (roughly 1-2 rounds), but it's no longer the "wildly backwards" picture flagged
+earlier; McBride (25th) and Kittle (39th) both sit ahead of him on real, evidenced grounds (McBride's clean
+health record, both players' fully-credited elite usage) rather than an unexplained anomaly.
+
+**Honest state of the remaining gap**: not fully closed, and not chased further this round without new
+evidence to test - the most likely remaining explanations are qualitative signal this project's data sources
+structurally can't see (the Paganetti-quoted coaching intent to feed him at a historic rate, verified real but
+not something any nflreadpy source captures) or a genuine model-vs-market difference in how much credit a
+still-unresolved injury history deserves once "clean recovery" is reported but not yet proven on the field -
+neither is a fixable bug with current data, matching this project's established practice of naming a real,
+evidenced limitation rather than force-fitting another correction without support.
+
+Both boards regenerated (740 rows each) with the TE durability boost included.
+
+
+
+### 2026-08-29 (cont'd) - Bowers rate-side audit: full feature decomposition, no hidden bug found
+
+User pushed to check the efficiency/rate side specifically ("still doesn't feel like a good enough change").
+Rather than guess, pulled real per-target box-score numbers (2024-2025) for Bowers/McBride/Kittle: Bowers and
+McBride are genuinely comparable possession-receiver profiles (both ~7.3-7.9 yards/target, ~74-75% catch
+rate) - Kittle is the real outlier of the three, a much more explosive big-play threat (9.1-11.8 yards/
+target). This rules out "Bowers is secretly less efficient than McBride" as an explanation.
+
+**Checked wavg_separation specifically** (Bowers sits at just the 10.6th percentile among 2026 TEs, real and
+striking) - hypothesized this might be dragging his rate down, matching the real NFL scouting read that he
+wins more through contested-catch ability/body control than route-separation. Pulled the TE Ridge model's own
+fitted coefficient: wavg_separation is NEGATIVE (-0.106), and directly tested the raw same-season relationship
+(corr(wavg_separation, ppg) = -0.198, p<0.0001, n=567, TE-only - a real, new finding, distinct from the
+already-established near-zero WR result from 2026-08-09). Net effect: Bowers' LOW separation actually works
+SLIGHTLY IN HIS FAVOR relative to a high-separation comp like McBride, not against him - directly ruled out as
+an explanation, the opposite of the hypothesis.
+
+**Full linear decomposition of Bowers vs. McBride's ppg_pred gap** (contribution = coefficient x feature
+difference, using the imputed, exact values each model actually saw): the -1.04 ppg gap breaks down into many
+small, individually real factors, not one dominant fixable error - prev_games_played (-0.38, real durability
+difference), wavg_ppg (-0.31, real modest talent/rate gap), vacated_targets_pg (-0.21), wavg_targets_pg
+(-0.16), new_head_coach (-0.14), cap_percent_pos_rank (-0.14), with several smaller factors partially
+offsetting in Bowers' favor (wavg_yac_above_exp +0.06, wavg_carries_pg +0.08, vacated_routes_run_pg +0.21).
+
+**Verified the two largest unverified pieces rather than trusting the decomposition blindly**: (1) vacated_
+targets_pg (McBride's Arizona at 13.33 vs Bowers' Las Vegas at 5.71) - pulled the actual player list driving
+Arizona's number (Michael Carter, Zay Jones, Greg Dortch, Emari Demercado, and others - real, verified 2025-
+>2026 departures, not a data artifact); (2) new_head_coach=1 for Bowers' team - verified via web search that
+the Raiders hired Klint Kubiak as HC in February 2026 (their third HC in three seasons, genuine real
+turnover) - matches data this project already had flagged correctly since mid-August.
+
+**Conclusion: no hidden bug found in the rate side.** Every individually-checkable piece of the remaining gap
+traces to something real and verified - not an error, an omission, or a stale value. The residual gap between
+Bowers' board position and his real market ADP most likely reflects the two things already named in the prior
+entry (qualitative coaching-intent signal this project's data can't see, and a real, still-unresolved "clean
+recovery reported but not yet proven on the field" premium the market may be pricing that a backward-looking
+statistical model structurally can't credit until it's demonstrated). This is now a closed, evidence-backed
+diagnostic, not an open bug - no further code changes indicated from this specific investigation.
+
