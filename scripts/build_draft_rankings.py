@@ -37,6 +37,7 @@ from ffmodel.season import (
     add_recent_injury_history_flag,
     apply_current_team_from_sleeper,
     apply_depth_chart_team_fallback,
+    apply_manual_status_overrides,
     apply_qb_backup_games_est,
     apply_qb_role_upgrade_boost,
     apply_qb_starter_floor,
@@ -307,6 +308,11 @@ def main() -> None:
     efficiency_ceiling = compute_efficiency_ceiling(season_stats, rosters, play_volume)
     team_ceiling = compute_team_position_ceiling(pace_pred, efficiency_ceiling)
     board = apply_team_opportunity_cap(board, team_ceiling)
+
+    board = apply_manual_status_overrides(board)
+    n_overridden = board["manual_override_note"].notna().sum()
+    if n_overridden:
+        print(f"  applied {n_overridden} manual status override(s) for breaking news not yet in any data source")
 
     print("Computing value-based rankings...")
     board = compute_vbd(

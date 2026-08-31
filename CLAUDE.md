@@ -3623,3 +3623,44 @@ profiles. Also: matching requires an exact "First Last" substring, so a coach re
 by first name or nickname across a whole entry (rare in the sampled data, but not impossible) would be
 missed - not measured, no evidence yet that this is a real gap.
 
+### 2026-08-30 (cont'd) - live refresh, a manual-override mechanism for same-day breaking news, and a
+published draft-board artifact
+
+Ran a routine live-data refresh (`refresh-board` skill) right after coachspeak shipped: re-pulled injuries/
+Sleeper/rosters/depth-chart, regenerated both boards. Backtest identical to baseline (confirms live-only
+refresh doesn't touch training). No new missing-QB1 gaps, no appeared/disappeared players; 66 depth-chart
+shifts, all deep-bench churn except a real, verified Najee Harris RB3->RB2 promotion on the Giants (signed
+during camp, recovering from a 2025 Achilles tear - confirmed via web search).
+
+**Mid-session, user flagged real breaking news the refresh couldn't have caught**: Josh Jacobs (GB RB, was
+#16 overall) placed on the NFL Commissioner's Exempt List the same day (8/30/26), facing misdemeanor battery/
+criminal-damage charges, barred from all team activity with no return timeline - confirmed via web search
+(ESPN, NFL.com). None of this project's data sources reflected it (`status` still "ACT", Sleeper still "DNR" -
+a same-day legal event will always outrun a periodic data pull, this isn't a data-freshness bug to fix, just
+an inherent lag).
+
+**Shipped `apply_manual_status_overrides`** (season.py) - a small, hand-maintained, dated table
+(`MANUAL_STATUS_OVERRIDES`, keyed by player_id) for exactly this class of event: real news that broke too
+recently for any structured source to catch up, with no comparable historical precedent to statistically
+calibrate against (unlike every other durability correction in this pipeline). Forces `games_est` (and the
+`total_points_pred` that depends on it) to a conservative, explicitly-not-calibrated placeholder, and adds a
+visible `manual_override_note` board column so the reason is transparent rather than a silent number change.
+Wired in right before `compute_vbd` (so the override propagates into VBD/rank/replacement level) and before
+the Monte Carlo sim (so its residual draws center on the corrected baseline). Jacobs: games_est 14.49 -> 2.0
+(a deliberately conservative placeholder, not a fabricated timeline), total_points_pred 188.97 -> 26.08,
+overall rank 16 -> 425. Meant as a stopgap per player, removed once a real source (roster status, injury
+report) reflects the situation structurally - documented in the constant's own docstring.
+
+**Interesting cross-check, not planned**: Jacobs' coachspeak quotes (already tagged before this news broke)
+show Packers GM Brian Gutekunst and HC Matt LaFleur fielding direct questions about "if Josh Jacobs is
+suspended" on 8/26 and 8/28 - the situation was clearly already brewing in real presser coverage before the
+official league placement, and the coachspeak overlay surfaced it automatically without any special-casing.
+
+**Published a sortable/searchable draft-board Artifact** (both scoring formats toggle, click-to-sort every
+column, search, position filters, click-to-expand row detail showing coachspeak quotes/coach reliability
+bars/simulated season range/boom-bust probability, a visible warning badge+banner for Jacobs). Data embedded
+inline as JSON (~1.35MB, well under the artifact size cap) from both regenerated boards - private by default,
+not shared. Utilitarian/tool treatment (condensed athletic display face + technical mono/sans pairing, warm-
+olive-neutral palette with an amber accent and four semantic position colors), not editorial, matching the
+page's actual job (a scannable draft-day reference, not a marketing page).
+

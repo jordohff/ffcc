@@ -2968,6 +2968,60 @@ precisely because so few remain useful past the top of the position).
 """
 
 
+MANUAL_STATUS_OVERRIDES: dict[str, dict] = {
+    # Josh Jacobs (GB RB) - placed on the NFL Commissioner's Exempt List
+    # 8/30/26, facing misdemeanor battery/criminal-damage charges, barred
+    # from all team facility access except individual workouts, no return
+    # timeline (per ESPN/NFL.com, same day). None of this project's data
+    # sources (nflverse roster status, Sleeper injury status, depth chart)
+    # reflect this yet - a same-day event like this always outruns a
+    # periodic data pull. games_est set to a conservative low placeholder
+    # (not 0 - a mid/late-season return if the case resolves quickly isn't
+    # impossible) rather than fabricated from any real base rate, since this
+    # project has no comparable historical cases to calibrate against (a
+    # genuinely different situation from every other durability correction
+    # in this pipeline, all of which ARE calibrated on real precedent).
+    # Remove this entry once a real data source (roster status, injury
+    # report) catches up and reflects it structurally instead.
+    "00-0035700": {
+        "games_est": 2.0,
+        "note": "Placed on NFL Commissioner's Exempt List 8/30/26 (pending misdemeanor charges) - "
+        "barred from team activity, no return timeline. Manual override, not calibrated to precedent.",
+    },
+}
+"""Hand-maintained, dated overrides for real-world events that broke too
+recently for any of this project's periodic data pulls to reflect yet
+(legal/suspension news, a sudden retirement mid-week, etc.) - the same
+"informational, transparently flagged, not silently absorbed into the
+statistical model" treatment already used for the OC-lineage CSV, just for
+single-event news instead of season-long context. Keyed by player_id (not
+name, to avoid any collision risk). Each entry should be removed once a real
+structured source (roster status, injury report) catches up - this is a
+stopgap, not a permanent feature of the pipeline.
+"""
+
+
+def apply_manual_status_overrides(board: pd.DataFrame) -> pd.DataFrame:
+    """Force games_est (and the total_points_pred that depends on it) for
+    any player in MANUAL_STATUS_OVERRIDES, and add a visible
+    `manual_override_note` column so the reason is transparent on the board
+    rather than a silent number change. Must run BEFORE compute_vbd so the
+    override propagates into VBD/rank/replacement level, and before the
+    Monte Carlo simulation so its residual draws are centered on the
+    corrected baseline.
+    """
+    board = board.copy()
+    board["manual_override_note"] = pd.NA
+    for player_id, override in MANUAL_STATUS_OVERRIDES.items():
+        mask = board["player_id"] == player_id
+        if not mask.any():
+            continue
+        board.loc[mask, "games_est"] = override["games_est"]
+        board.loc[mask, "total_points_pred"] = board.loc[mask, "ppg_pred"] * override["games_est"]
+        board.loc[mask, "manual_override_note"] = override["note"]
+    return board
+
+
 def compute_vbd(
     board: pd.DataFrame,
     teams: int = 12,
