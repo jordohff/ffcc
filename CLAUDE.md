@@ -3529,3 +3529,97 @@ stat can provide. No code shipped. Closed this specific data-only avenue in pers
 (`breakout_trajectory_hypothesis.md`, updated from "untested" to "tested and rejected") - the coachspeak plan
 remains the live path for this whole class of case, not a fallback after a failed data fix.
 
+### 2026-08-30 - coachspeak ingested: a per-player quote overlay, informational only
+
+User delivered the compiled coachspeak file promised in the plan above: two files in
+`data/paid/Coachspeak/` (gitignored, proprietary - same treatment as the FantasyPoints CSVs) -
+"Coach Gauges.docx" (32 screenshots from a site called The Coachspeak Index, one per team, showing a
+coach's editorial blurb plus 4 needle-gauge dials - Injuries/Depth Chart/Usage-Workload/Transactions -
+rating how much to trust that coach's public statements in each category) and "Coachspeak 8.30.26.docx"
+(Greg Brainos's own compiled presser notes, "since the beginning of the year").
+
+**Cataloged both before building anything** (via a forked background agent, to keep the raw
+image-reading and 8.7MB-XML grunt work out of the main context). Real finding that changed the design:
+the gauge screenshots have no numeric labels (needle-angle-only, eyeballed at best), but the SECOND
+file turned out to be a raw Discord channel export containing dated bracketed annotations like
+`[Payton has an 85% reliability rating on injury coachspeak]` and `[injury coachspeak 60% -> 65%]` -
+a precise, dated time series of the same 4 scores, and a strictly better source than the gauge images.
+Decided not to parse the gauges doc at all - everything useful in it (team/coach identity, current
+scores) is already derivable from the notes doc, which is also the only source with real quotes.
+
+**Verified one apparent anomaly before trusting the data**: the gauges doc shows Kevin Stefanski
+coaching Atlanta, which looked like a mislabel (Stefanski's long association is with Cleveland). Web
+search confirmed it's real - Stefanski was named Falcons HC on 1/17/26, replacing Raheem Morris. Notably
+this project's OWN coaching-history data had never flagged that move - a useful cross-check finding for
+later (Coachspeak Index may track some real moves faster than this pipeline's own nflreadpy-based
+sources).
+
+**Scoped the mechanism with the user before building**: recommended (and user agreed) a per-player quote
+overlay - informational board columns only, no numeric feature - and explicitly NOT a trust-weighting of
+existing depth-chart-based corrections (apply_role_security_discount etc.) by coach reliability score.
+Reasoning: every correction currently in this pipeline was walk-forward validated against MULTIPLE real
+seasons of outcomes before shipping; the Coachspeak reliability scores only cover this one season
+(Jan-Aug 2026, the site's first year, and per the user Greg's own graded/actionable coachspeak data only
+goes back a couple of years - not deep enough to validate a numeric weighting scheme the way this
+project validates everything else). Same treatment already given to the OC-lineage CSV (informational,
+not trained, for the same single-season-of-coverage reason).
+
+**Built `src/ffmodel/coachspeak.py`** - parses the Discord export directly from the zipped .docx XML
+(no new dependency - zipfile + stdlib xml, matching this project's "ask before adding deps" practice).
+Real structural finding, verified empirically rather than assumed: the export has NO team-header text
+anywhere - team boundaries were reverse-engineered as a backward jump in the post timestamp (each
+team's section is internally chronological Jan->Aug, then jumps back to January for the next team) -
+confirmed by counting exactly 31 backward jumps for the known 32 teams before trusting this as the
+section-boundary signal, rather than guessing.
+
+**Two real bugs caught in validation, not shipped blind (same discipline as every other feature in this
+project):**
+1. The coach-name regex's character class only included the ASCII apostrophe, not the curly ’ (U+2019)
+   the actual document uses - silently truncated every name after an apostrophe (e.g. "Kevin O'Connell"
+   captured as just "Kevin"). Found by spot-checking a Minnesota entry and tracing the exact codepoint
+   before assuming it was a display issue.
+2. Quote snippets were being truncated from the START of a multi-topic Discord post (several "on X:"
+   sub-quotes per post is the norm) rather than centered on the actual player mention - caught when a
+   Brock Bowers snippet showed unrelated Raiders QB-competition text with no mention of Bowers anywhere
+   in the visible (truncated) portion. Fixed by splitting each entry's body on its own paragraph
+   boundaries and keeping only the paragraph(s) that actually contain the player's name, rather than a
+   blanket character-count truncation.
+
+**Player-name matching restricted to a player's own team's coaches** (deliberately, not league-wide) -
+avoids false positives from common surnames across different teams, and matches the real relationship
+this overlay is meant to surface (a player's own coach talking about them). Requires a real "First Last"
+match (suffix-stripped, same convention as paid_data.py's crosswalk) - a bare last name alone isn't
+searched for, to avoid spurious hits.
+
+**Verified against real board data, not just unit-tested in isolation**: 1,020 real presser entries
+parsed (from ~1,038 raw dated Discord posts - the small gap is boilerplate "pinned a message" system
+notices and one one-time formatting-note entry, both correctly filtered), 2,596 player-tagged quote rows
+across 475 distinct players, 35 reliability-score annotations covering 16 of 32 teams (the rest show
+"insufficient data," consistent with the gauges site - mostly 2026 coaching hires with a short public
+track record so far). Spot-checked Tucker Kraft, Brock Bowers, and Jeremiyah Love (all three real,
+previously-diagnosed market-gap cases from earlier sessions) and confirmed their surfaced quotes are
+genuinely on-topic and recent. Also surfaced an interesting confirmation, not a bug: Kyler Murray's
+tagged quotes are about being named MINNESOTA's starting QB over J.J. McCarthy - matches this project's
+own earlier-established fact (see the 2026-08-13 FantasyPros-comparison entry) that Murray's Sleeper
+`team` already resolves to MIN, i.e. two independent data sources agreeing on the same real trade.
+
+**Wired into `build_draft_rankings.py`** right after the Monte Carlo simulation merge (after VBD/
+ranking is fully settled) - picks up the most recent `Coachspeak *.docx` file present by filename sort
+(so a future dated drop, e.g. "Coachspeak 9.15.26.docx", is picked up automatically without a code
+change) and fails soft (skips with a printed message) if the directory doesn't exist, matching the
+OC-CSV pattern. Adds 6 new board columns: `coachspeak_notes` (up to 2 most recent player-tagged quotes,
+dated and coach-attributed), `coachspeak_last_date`, and `reliability_injury`/`_depth_chart`/
+`_usage_workload`/`_transactions` (the player's team's current 4 scores, broadcast team-wide). Confirmed
+end to end on a full regenerated board (both scoring formats, 740 rows each, unchanged row count - no
+new NaN-merge duplication): backtest headline numbers identical to pre-coachspeak (QB 0.732959, RB
+0.802010, TE 0.825065, WR 0.808578) - confirms this is purely additive/informational, doesn't touch
+model training, predictions, or VBD at all, as designed.
+
+**Not yet done, worth knowing**: reliability scores are broadcast at the TEAM level (whichever coach's
+scores were most recently annotated for that team), not resolved to the SPECIFIC coach quoted in a given
+snippet - fine for now since most teams have one clearly dominant presser-giving coach (HC), but would
+need refining if a team has both an HC and OC/GM regularly quoted with materially different reliability
+profiles. Also: matching requires an exact "First Last" substring, so a coach referring to a player only
+by first name or nickname across a whole entry (rare in the sampled data, but not impossible) would be
+missed - not measured, no evidence yet that this is a real gap.
+

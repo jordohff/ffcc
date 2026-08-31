@@ -19,6 +19,13 @@ from pathlib import Path
 
 import pandas as pd
 
+from ffmodel.coachspeak import (
+    build_coachspeak_overlay,
+    extract_reliability_scores,
+    find_player_quotes,
+    latest_reliability_by_team,
+    parse_coachspeak_entries,
+)
 from ffmodel.features import compute_routes_run
 from ffmodel.season import (
     aggregate_healthy_season_stats,
@@ -69,6 +76,7 @@ from ffmodel.season import (
 
 RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
 COACHING_DIR = Path(__file__).resolve().parents[1] / "data" / "coaching"
+COACHSPEAK_DIR = Path(__file__).resolve().parents[1] / "data" / "paid" / "Coachspeak"
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "output" / "draft_rankings"
 
 # Players on injured reserve/exempt list are still worth ranking (could come
@@ -322,6 +330,20 @@ def main() -> None:
     sim = simulate_season_outcomes(board, vet_residuals, rookie_residuals)
     sim = sim.dropna(subset=["player_id"])
     board = board.merge(sim, on="player_id", how="left")
+
+    coachspeak_files = sorted(COACHSPEAK_DIR.glob("Coachspeak *.docx")) if COACHSPEAK_DIR.exists() else []
+    if coachspeak_files:
+        coachspeak_path = coachspeak_files[-1]
+        print(f"Merging coachspeak overlay (informational only) from {coachspeak_path.name}...")
+        cs_entries = parse_coachspeak_entries(str(coachspeak_path))
+        cs_reliability = extract_reliability_scores(cs_entries)
+        cs_latest = latest_reliability_by_team(cs_reliability)
+        cs_quotes = find_player_quotes(cs_entries, board[["player_id", "player_display_name", "team"]])
+        cs_overlay = build_coachspeak_overlay(cs_quotes, cs_latest)
+        board = board.merge(cs_overlay, on="player_id", how="left")
+        print(f"  tagged {cs_overlay['player_id'].nunique():,} players with a recent coach quote")
+    else:
+        print(f"  no coachspeak file found at {COACHSPEAK_DIR}, skipping coachspeak overlay")
 
     # Cache the residual pools so scripts/simulate_roster.py (phase 2 - a
     # specific drafted roster) can reuse the exact same walk-forward error
