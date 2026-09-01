@@ -3987,3 +3987,17 @@ would disappear after the first scroll tick. Added a jsdom check that the placeh
 a real value; all 26 tests pass. Verified visually in a real browser (both at page-top and after scrolling)
 before publishing, matching this session's established discipline for anything layout-related.
 
+### 2026-08-31 (cont'd) - Dataroma half-PPR export wired in
+
+Previously the half-PPR composite board silently reused Dataroma's PPR export (only one file existed) - user
+grabbed and dropped in a real half-PPR export (`ff-dataroma-redraft-rankings-half-ppr.csv`). `load_dataroma`
+itself needed no changes (format-identical CSV, just different underlying numbers); `build_composite_board.py`
+now picks the file via a `DATAROMA_FILES = {"ppr": ..., "half_ppr": ...}` dict keyed on `--scoring`, falling
+back to the PPR file if a scoring-specific one isn't present (fails soft, same pattern as the OC-CSV loader,
+rather than erroring over an optional per-format refinement). Verified the two formats now genuinely diverge,
+not just theoretically capable of it: De'Von Achane's Dataroma rank 17 (PPR) vs 18 (half-PPR), Christian
+McCaffrey 6 vs 5 - small, real, directionally-sensible shifts (receiving-dependent backs lose a little ground
+in half-PPR). Regenerated both composite boards + `board_data.json`, all 26 tests still pass, republished.
+Barrett and Hansen still have only one (assumed-PPR / confirmed-PPR) export each - same treatment as before,
+not changed this round.
+
