@@ -3945,3 +3945,32 @@ static-rank regression test to the suite, all 24 pass), a real browser for anyth
 rank rendering, the draft-a-mid-list-player-and-watch-numbers-not-shift check, Stribling's real consensus
 numbers now populated). Republished to the same Artifact URL.
 
+### 2026-08-31 (cont'd) - our model deweighted further to quarter-weight; Walker/Waddle flagged for a real investigation
+
+User: "deweight our model by half again" - `SOURCE_WEIGHTS["our"]` 0.5 -> 0.25 (CSI unchanged at 0.5). Real,
+specific reasoning given, distinct from CSI's own (coarser/single-analyst) rationale: this project's durability
+model is still walk-forward validating, and the user has low confidence in its estimates specifically for
+players with a fresh, real opportunity change (new team/role) that a backward-looking games_est can't fully
+see yet - Kenneth Walker III (KC, replacing an unproductive incumbent backfield) and Jaylen Waddle (new #1 WR
+role after Miami's offseason changes) cited as concrete examples. Verified directionally before publishing:
+Walker's own-model rank (61) vs. the external sources (Dataroma 9, Barrett 12, Hansen 19, CSI position-rank
+7) is a real, large gap - the reweighted consensus_overall_rank (17.0) now sits much closer to the external
+view; Waddle similarly (our 102 vs. external teens/twenties/50s, consensus now ~44).
+
+**User explicitly deferred the actual model investigation ("we don't need to run Walker/Waddle into our model
+tonight but I want to look into those situations because they seem very outlier")** - noted here as a live,
+concrete open thread for a future session, not resolved tonight. The real underlying question worth testing
+then: does this project's durability estimate (`games_est`, GBM-based since 2026-08-28) systematically
+under-credit players who've just received a genuinely fresh, real opportunity (new team, vacated role) the
+way the already-fixed `apply_role_upgrade_durability_boost`/`apply_unrostered_games_est` mechanisms handle
+QBs and unrostered veterans, but with no equivalent yet for a non-QB player who changes teams into a clearly
+larger role? Walker (RB, KC) and Waddle (WR, MIA new-role) are exactly the kind of real, named test cases a
+future walk-forward investigation should start from - same standing discipline as every other durability
+finding in this project: test on real historical data before shipping anything, don't hand-patch two named
+players.
+
+Regenerated both composite boards + `board_data.json`, updated the module docstring, `SOURCE_WEIGHTS`'
+comment, and the artifact's own footer copy (now reads "quarter"/"half" instead of the prior "half"/"half").
+All 25 jsdom tests still pass (no logic touched, only the weighting constant and regenerated data).
+Republished to the same Artifact URL.
+

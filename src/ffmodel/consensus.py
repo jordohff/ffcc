@@ -19,9 +19,13 @@ Sources, as described by the user:
   per the user). Delivered as a PDF, not a CSV - parsed via pdftotext.
 
 Design choices, and why:
-- WEIGHTED across sources - originally equal weight (2026-08-31), revised
-  same day to SOURCE_WEIGHTS: our own model and CSI count half as much as
-  Dataroma/Barrett/Hansen, per the user's explicit choice.
+- WEIGHTED across sources (see SOURCE_WEIGHTS) - started equal-weight
+  (2026-08-31), revised same day to half-weight our model + CSI, revised
+  again the same day to quarter-weight our model specifically (still walk-
+  forward validating, and the user has low confidence in its durability
+  estimates for players with a fresh real-world opportunity change - see
+  SOURCE_WEIGHTS' own comment for the full reasoning), all per the user's
+  explicit, evolving choice.
 - Anchored to OUR OWN board's player set (the already-built 740-row
   draft_rankings CSV), not a new universe - an external source's player we
   don't already have a row for is dropped, not added. This project's board
@@ -298,13 +302,18 @@ def match_to_board(source: pd.DataFrame, crosswalk: pd.DataFrame, source_label: 
     return merged.dropna(subset=["join_key"]).drop_duplicates(subset="join_key", keep="first")
 
 
-# User's explicit choice (2026-08-31): our own model and CSI count HALF as
-# much as Dataroma/Barrett/Hansen in the blend - CSI is a single analyst's
-# positional-only tiered read (no overall rank, coarser granularity than
-# the other 3's per-player numeric ranks), and weighting our own model down
-# keeps the Consensus view an actual second opinion rather than one that's
-# implicitly half "us".
-SOURCE_WEIGHTS = {"our": 0.5, "dataroma": 1.0, "barrett": 1.0, "hansen": 1.0, "csi": 0.5}
+# User's explicit choice (2026-08-31, revised same day - "deweight our model
+# by half again"): our own model counts a QUARTER as much as Dataroma/
+# Barrett/Hansen, CSI counts HALF as much. Two different, specific reasons,
+# not the same rationale applied twice: CSI is a single analyst's coarser
+# positional-only tiered read (no overall rank), while our own model is
+# still walk-forward validating and the user specifically has low
+# confidence in ITS durability estimates for players with a fresh, real
+# opportunity change (new team/role) that a backward-looking games_est
+# can't fully see yet - Kenneth Walker III and Jaylen Waddle cited as
+# concrete examples. Weighting our own model down keeps the Consensus view
+# an actual outside check rather than implicitly being mostly "us".
+SOURCE_WEIGHTS = {"our": 0.25, "dataroma": 1.0, "barrett": 1.0, "hansen": 1.0, "csi": 0.5}
 
 
 def weighted_mean(df: pd.DataFrame, cols: list[str], weights: list[float]) -> pd.Series:
