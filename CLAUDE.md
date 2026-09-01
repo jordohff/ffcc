@@ -3974,3 +3974,16 @@ comment, and the artifact's own footer copy (now reads "quarter"/"half" instead 
 All 25 jsdom tests still pass (no logic touched, only the weighting constant and regenerated data).
 Republished to the same Artifact URL.
 
+### 2026-08-31 (cont'd) - last-updated timestamp added to the artifact
+
+User asked for a "last updated" timestamp, right-aligned above the header. Added `generated_at`
+(`datetime.now().strftime("%b %d, %Y, %I:%M %p")`) as a top-level key in `board_data.json`
+(`build_board_artifact_data.py`) - deliberately reflects when the DATA was last regenerated (i.e. when that
+script last ran), not when the Artifact page was last published, since those can diverge (a CSS/layout-only
+republish, like several earlier this session, doesn't touch the data). Displayed via a new `.last-updated`
+div, right-aligned, placed as the first child inside `.masthead-inner` (above the title row) so it's part of
+the already-sticky masthead and stays visible while scrolling, rather than a separate non-sticky element that
+would disappear after the first scroll tick. Added a jsdom check that the placeholder dash gets replaced with
+a real value; all 26 tests pass. Verified visually in a real browser (both at page-top and after scrolling)
+before publishing, matching this session's established discipline for anything layout-related.
+

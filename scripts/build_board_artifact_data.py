@@ -12,6 +12,7 @@ Usage:
 """
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -62,7 +63,12 @@ def build_one(scoring: str) -> list[dict]:
 
 
 def main() -> None:
-    data = {"half_ppr": build_one("half_ppr"), "ppr": build_one("ppr")}
+    # Displayed in the artifact's masthead - reflects when this SCRIPT was
+    # last run, i.e. when the embedded data was actually last regenerated,
+    # not when the page was last published (those can differ if a
+    # publish-only change, like a CSS fix, happens without new data).
+    generated_at = datetime.now().strftime("%b %d, %Y, %I:%M %p")
+    data = {"generated_at": generated_at, "half_ppr": build_one("half_ppr"), "ppr": build_one("ppr")}
     out_path = BOARD_DIR / "board_data.json"
     out_path.write_text(json.dumps(data), encoding="utf-8")
     print(f"Wrote {out_path} ({out_path.stat().st_size / 1024:.0f} KB, "
