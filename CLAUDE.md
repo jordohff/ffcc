@@ -3664,3 +3664,130 @@ not shared. Utilitarian/tool treatment (condensed athletic display face + techni
 olive-neutral palette with an amber accent and four semantic position colors), not editorial, matching the
 page's actual job (a scannable draft-day reference, not a marketing page).
 
+### 2026-08-31 - composite/consensus board: blends our model with 4 trusted external ranking sources
+
+User asked how to build a composite board combining this project's own model with several paid/online
+rankings they trust, then supplied 4 real files into a new `data/paid/ConsensusRankings/` folder (gitignored,
+same treatment as every other paid source): Dataroma (PPR, overall rank + tier + position rank + real ADP,
+"has a little more juice on it" per the user - their most-trusted source here), Scott Barrett/FantasyPoints
+(overall rank only, scoring format NOT stated in the export - ASSUMED PPR since it's the same site/
+subscription as the Hansen file below, not confirmed), John Hansen/FantasyPoints (overall rank, top 200,
+EXPLICITLY PPR per the export's own "Format" column), and The Coachspeak Index/Greg Brainos (a PDF, POSITIONAL
+ONLY - no overall rank at all - half-PPR, tiered, where a blank line between rank groups is a real tier break
+per the user).
+
+**Deliberately built as a separate, additive output, not folded into the model's own VBD/training** - matches
+this project's long-standing, repeatedly-validated discipline of treating market/consensus opinion as a
+diagnostic prompt, not a target to fit (see the many entries throughout this file rejecting market-opinion-
+chasing corrections). This is a genuinely different, explicitly-requested use case (a human draft-day
+reference blending trusted opinions) from the model's own goal (predicting real outcomes), so it's kept
+structurally separate rather than treated as another walk-forward-validated correction.
+
+**Weighting**: EQUAL WEIGHT across all 5 "sources" (our model + the 4 external ones), per the user's explicit
+choice - no source gets more say than another.
+
+**Two separate composite numbers, not one blended score** (`src/ffmodel/consensus.py`, `build_composite_
+board`) - mixing them would hide real information:
+- `consensus_position_pct`: average of each source's own WITHIN-POSITION percentile (position_rank / that
+  source's own position pool size, computed on the source's own full list before any matching, so a low match
+  rate can't distort a player's true standing). Computable for every source, including CSI - the only number
+  CSI feeds into.
+- `consensus_overall_rank`: average of each source's raw overall rank, only across the 4 sources that publish
+  one (our model via `vbd.rank()` + Dataroma + Barrett + Hansen). CSI is deliberately EXCLUDED here rather than
+  inventing an implied overall rank for a positional-only source.
+
+**Anchored to OUR OWN board's player set** (the already-built 740-row draft_rankings CSV) - an external
+source's player we don't already have a row for is dropped, not added. Small, known scope limitation (our
+board is already very deep), not a real gap in practice.
+
+**CSI PDF parsing was the hard part, and needed real verification before trusting it** (`parse_csi_rankings`):
+- The PDF is a 3-column-per-position grid; `pdftotext -layout` scrambles reading order into a row-major mess
+  across columns. RAW (non-layout) extraction instead follows the PDF's content stream, which for this file
+  happens to match the rank-number sequence directly - verified by checking every position's parsed rank
+  sequence was a perfect contiguous 1..N with zero gaps and zero duplicates (RB 101, WR 147, TE 61, QB 42)
+  before trusting it, not just eyeballing a sample.
+- A blank line between rank groups is a real tier break (per the user) - tracked via a `pending_tier_break`
+  flag that only fires on the NEXT real content line, so consecutive blank lines don't double-count and a
+  position-header change doesn't create a spurious extra tier at the section boundary.
+- Standalone lines containing only stray "ff"/"fi"/"fl" ligature fragments are a page-footer/logo artifact
+  (confirmed by inspecting every occurrence), dropped before tier-break detection so they can't be mistaken
+  for real content.
+- The SAME ligature glyphs are also dropped MID-NAME for a few players (e.g. "Christian McCa rey" for
+  "McCaffrey", "Justin Je erson" for "Jefferson") - NOT reconstructed via regex guessing (fragile); instead
+  handled generically by `match_to_board`'s fuzzy (difflib) fallback, restricted to the same position to avoid
+  cross-position false positives, which is where fuzzy matching's real risk lives.
+- One name wraps across a line break with a hyphen ("KeAndre Lambert-" / "Smith") - a line ending in "-" is
+  joined directly (no space) to the next line before rank-token parsing.
+
+**Real match rates, reported not assumed** (`uv run scripts/build_composite_board.py`): Dataroma 195/198
+(98.5%), Barrett 124/125 (99.2%), Hansen 198/200 (99%), CSI 336/351 (95.7%, including 15 recovered via the
+fuzzy ligature fallback). Investigated the unmatched names before accepting them rather than assuming the
+matcher was complete: nearly all trace to TWO already-documented, pre-existing gaps in the board itself, not
+new bugs - (1) a handful of 2026 UDFA rookies (Carson Beck, Colbie Young, Oscar Delp, De'Zhaun Stribling,
+Nicholas Singleton) that ARE on the board by name but have `player_id = NaN` (the "no gsis_id for 2026
+rookies" gap documented back on 2026-08-13/08-29) - correctly excluded via the same `dropna(subset=
+["player_id"])`-before-merge convention used everywhere else in this pipeline to avoid the NaN-merge-fan-out
+bug class; (2) real veterans genuinely absent from our 740-row board entirely (Travis Hunter - a previously-
+documented nflreadpy weekly_stats gap; Brandon Aiyuk - not yet diagnosed, flagged for a future look if he
+becomes relevant).
+
+Output: `output/draft_rankings/composite_board_{season}_{scoring}.csv` (740 rows, one per board player) - our
+own rank/position_rank plus every source's raw rank/tier/position-rank side by side, `consensus_overall_rank`,
+`consensus_position_pct`, and `n_sources` (how many of the 5 actually ranked that player - 123 players have
+all 5, 403 are ranked only by our own model, i.e. deep-bench players none of the 4 external lists go that
+far). Not yet added to the published interactive board Artifact - CSV only for now, offered as a next step if
+the user wants it visualized the same way.
+
+### 2026-08-31 (cont'd) - consensus view added to the artifact, plus a draft-day "drafted" tracker
+
+Wired the composite/consensus board into the published draft-board Artifact and added an unrelated but
+draft-day-useful feature the user asked for in the same turn: a checkbox to mark a player drafted, which
+filters them off the list.
+
+**"Consensus" view, deliberately a SEPARATE toggle from the existing scoring toggle** (user's explicit ask:
+"I'd like for it to be a separate button/toggle to not confuse myself with our own VBD ranking") - a
+`view-toggle` control (Our Board / Consensus) styled with a dark-ink active state, visually distinct from the
+gold-accent scoring toggle, so the two read as different axes (whose ranking vs. which scoring format) rather
+than variants of the same control. Consensus view swaps the table's columns to Our Board / Dataroma / Barrett
+/ Hansen / CSI (pos+tier) / Consensus / Src, sorted ascending by `consensus_overall_rank` by default (lower
+rank = better, opposite of VBD's descending default) - switching views resets sort to that view's own sensible
+default rather than keeping a leftover sort key.
+
+**Data pipeline**: new `scripts/build_board_artifact_data.py` merges the model board CSV with the composite
+board CSV (on `player_id`) into the single `board_data.json` blob the artifact embeds - regenerate this (then
+re-embed, see below) any time the model board OR the composite board is rebuilt. **Caught the same NaN-merge-
+fan-out bug class this project has hit repeatedly**: both sides carry the same ~7 known UDFA-rookie rows with
+`player_id = NaN` (the gsis_id gap documented since 2026-08-13), and a naive merge fanned 740 rows out to 782
+(7x7 cross product on the null key) before catching it via a row-count sanity check and fixing it with
+`composite.dropna(subset=["player_id"])` before the merge, the same pattern used everywhere else in this
+pipeline.
+
+**Real UI bug found and fixed during testing, not just the two features shipped as designed.** Built a proper
+test harness (jsdom, not just eyeballing) since a change this size to a previously-untested artifact warranted
+it: loads the actual authored HTML/JS in a real DOM, dispatches real click/change events, asserts on rendered
+output. This caught a genuine pre-existing bug (not introduced this session, but made worse by the new drafted-
+checkbox feature riding the same pattern): rows with `player_id === null` were all falling back to the SAME
+identity key (`r.player_id || ''`, i.e. every null-id row shares `''`) for both the row's own `data-id` AND
+the new checkbox's `data-id` - meaning expanding OR drafting any ONE of those ~7 players would spuriously
+affect all the others sharing the empty-string key too (confirmed via the test harness: 7 detail rows were
+already "expanded" on a fresh page load with zero clicks, before any fix). Fixed with a `rowKey(r)` helper
+(`r.player_id || r.player_display_name`) used everywhere identity matters - display name isn't a guaranteed-
+unique key in general, but is for this specific small, known population, and is stable across re-renders/sorts
+unlike a row-index-based key would be.
+
+**Drafted-tracker**: a checkbox column (leftmost) toggles a player in/out of a `Set` persisted to the viewer's
+own `localStorage` (`ff-draft-board-drafted-v1`, wrapped in try/catch per artifact-authoring convention) -
+checking a box removes that player from the visible list immediately. A "N drafted · hidden/showing" toggle
+button brings drafted players back into view (rendered dimmed + struck-through, checkbox still checked) so a
+mis-click can be undone - the only way to un-draft, since a hidden row's checkbox can't be clicked. Drafted
+state is global across both the scoring toggle and the view toggle (keyed only by player identity), and is
+per-browser/per-viewer only, never shared or synced - explicitly documented in the footer so the user
+understands the scope.
+
+**Testing discipline**: `node --check` for syntax, then a real jsdom harness (installed to a scratch temp
+directory, not added to the project) exercising 23 assertions end-to-end - view switching, sort direction and
+monotonicity in both views, search/position/scoring filters, the drafted checkbox flow (draft -> hide -> show
+-> undraft -> re-draft -> localStorage persistence check), row-expand-vs-checkbox-click independence, and the
+null-id collision fix. All 23 passed before publishing. Republished to the same Artifact URL (a675377a...,
+`consensus-view+draft-tracker` label) rather than creating a new one, so the user's existing link keeps working.
+
