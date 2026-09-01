@@ -16,6 +16,9 @@ from pathlib import Path
 
 import pandas as pd
 
+from ffmodel.consensus import add_join_key
+from ffmodel.paid_data import _normalize_name
+
 BOARD_DIR = Path(__file__).resolve().parents[1] / "output" / "draft_rankings"
 
 MODEL_COLS = [
@@ -26,9 +29,10 @@ MODEL_COLS = [
     "reliability_usage_workload", "reliability_transactions", "manual_override_note",
 ]
 COMPOSITE_COLS = [
-    "player_id", "our_overall_rank", "dataroma_overall_rank", "dataroma_tier", "dataroma_position_rank",
-    "barrett_overall_rank", "barrett_position_rank", "hansen_overall_rank", "hansen_position_rank",
-    "csi_position_rank", "csi_tier", "consensus_overall_rank", "consensus_position_pct", "n_sources",
+    "player_id", "player_display_name", "our_overall_rank", "dataroma_overall_rank", "dataroma_tier",
+    "dataroma_position_rank", "barrett_overall_rank", "barrett_position_rank", "hansen_overall_rank",
+    "hansen_position_rank", "csi_position_rank", "csi_tier", "consensus_overall_rank",
+    "consensus_position_pct", "n_sources",
 ]
 
 
@@ -36,12 +40,20 @@ def build_one(scoring: str) -> list[dict]:
     board = pd.read_csv(BOARD_DIR / f"draft_rankings_2026_{scoring}.csv")[MODEL_COLS]
     composite = pd.read_csv(BOARD_DIR / f"composite_board_2026_{scoring}.csv")[COMPOSITE_COLS]
     # Both sides carry a handful of NaN player_id rows (the already-documented
-    # 2026 UDFA-rookie gsis_id gap) - a left key of NaN fans out against every
-    # NaN on the right in a pandas merge (the same bug class this project has
-    # hit and fixed repeatedly elsewhere), so drop them from the right side
-    # before merging rather than let them multiply.
-    composite = composite.dropna(subset=["player_id"])
-    merged = board.merge(composite, on="player_id", how="left")
+    # 2026 UDFA-rookie gsis_id gap - De'Zhaun Stribling, Colbie Young, etc.).
+    # Merging on raw player_id silently throws these players' real composite
+    # data away entirely (their own board row has player_id=NaN, so a left
+    # join keyed on player_id alone never matches them to their own composite
+    # row, which also has player_id=NaN). Same fix as consensus.py's own
+    # match_to_board/build_composite_board: merge on a join_key that falls
+    # back to normalized display name only when player_id is null.
+    board["normalized_name"] = board["player_display_name"].map(_normalize_name)
+    composite["normalized_name"] = composite["player_display_name"].map(_normalize_name)
+    board = add_join_key(board)
+    composite = add_join_key(composite).drop_duplicates(subset="join_key", keep="first")
+    composite = composite.drop(columns=["player_id", "player_display_name", "normalized_name"])
+    merged = board.merge(composite, on="join_key", how="left")
+    merged = merged.drop(columns=["join_key", "normalized_name"])
     merged["consensus_position_pct"] = merged["consensus_position_pct"].round(4)
     merged["consensus_overall_rank"] = merged["consensus_overall_rank"].round(2)
     # NaN -> null via a JSON round-trip (pandas' own to_json handles this correctly,

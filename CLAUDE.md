@@ -3902,3 +3902,46 @@ day's 3 rounds: sticky positioning correct in both axes, page scrolls normally w
 (ready for the user's planned additional sources), and two more real, confirmed browser quirks fixed and
 documented for future sessions.
 
+### 2026-08-31 (cont'd) - 4 more requests: wider # column, static rank numbers, a SECOND Stribling bug, source weighting
+
+**# column widened.** 3-digit ranks (100+) were getting clipped at the old 34px width - bumped the frozen
+rank column to 46px (cascading the other frozen columns' `left` offsets accordingly: player 68->80, team
+268->280) and updated the matching width entry in the shared `COLUMNS` config.
+
+**Rank number now stays static across drafting.** Previously `#` was just the row's index in the FINAL
+(post-drafted-filter) list, so drafting anyone renumbered everyone below them - annoying mid-draft, since
+you lose your reference point for who's still available at their original spot. `currentRows()` now assigns
+`_rank` during the position/search/sort pass, BEFORE the separate drafted-hide filter runs, so drafting a
+player removes them from the list without shifting anyone else's number (a visible gap instead) - while
+switching sort/position/search still legitimately renumbers, since the ranked set itself changes.
+
+**Stribling was STILL broken - a second, distinct instance of the same join-key bug, not a re-occurrence of
+the first one.** The `consensus.py` fix from earlier today was real and correct (verified: Stribling's row
+in `composite_board_2026_*.csv` now has real data). But `scripts/build_board_artifact_data.py` - the
+SEPARATE script that merges the model board with that composite CSV to build the JSON the artifact actually
+embeds - still merged on raw `player_id`, so Stribling's composite row (still `player_id=NaN` in the CSV
+output, even though its CONTENTS are now correct) got silently dropped at this later, different merge step.
+Same fix applied here too: `add_join_key` (imported from `consensus.py`, not reimplemented) on both sides
+before merging. Verified directly in `board_data.json`: Stribling now shows `our_overall_rank: 167,
+dataroma_overall_rank: 113, ... consensus_overall_rank: 113.0` instead of all-null. Worth remembering: a
+join-key fix inside one function doesn't protect a SEPARATE merge elsewhere in the pipeline that reads the
+same (still player_id-keyed) CSV output - each merge site needs its own fix, not just the one closest to
+where the bug was first noticed.
+
+**Source weighting**: user asked to deweight this board's own model and CSI to half-weight vs. Dataroma/
+Barrett/Hansen in the Consensus blend (CSI is one analyst's coarser positional-only tiered read; downweighting
+our own model keeps the Consensus view an actual outside check rather than implicitly being half "us").
+Added `SOURCE_WEIGHTS` and a `weighted_mean` helper (skips a null value's WEIGHT from the denominator too,
+not just its contribution to the numerator - matching `.mean(skipna=True)`'s behavior, generalized) in
+`consensus.py`, applied to both `consensus_position_pct` (all 5 sources) and `consensus_overall_rank` (the 4
+with a real overall rank). Regenerated both composite boards and `board_data.json`, verified the weighted
+values differ from the old equal-weight numbers as expected (e.g. Stribling's PPR consensus_overall_rank
+119.75 equal-weight -> 113.0 weighted). Updated the module docstring and the artifact's own footer text
+(which still said "equal-weighted" - a real, easy-to-miss staleness trap when the underlying formula changes
+but the user-facing copy describing it doesn't get revisited in the same pass).
+
+All 4 changes verified via the same discipline as the rest of this session: jsdom for logic (added a new
+static-rank regression test to the suite, all 24 pass), a real browser for anything visual/layout (3-digit
+rank rendering, the draft-a-mid-list-player-and-watch-numbers-not-shift check, Stribling's real consensus
+numbers now populated). Republished to the same Artifact URL.
+

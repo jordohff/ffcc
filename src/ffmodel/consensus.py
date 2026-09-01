@@ -19,8 +19,9 @@ Sources, as described by the user:
   per the user). Delivered as a PDF, not a CSV - parsed via pdftotext.
 
 Design choices, and why:
-- EQUAL WEIGHT across sources (including our own model), per the user's
-  explicit choice - no source gets more say than another.
+- WEIGHTED across sources - originally equal weight (2026-08-31), revised
+  same day to SOURCE_WEIGHTS: our own model and CSI count half as much as
+  Dataroma/Barrett/Hansen, per the user's explicit choice.
 - Anchored to OUR OWN board's player set (the already-built 740-row
   draft_rankings CSV), not a new universe - an external source's player we
   don't already have a row for is dropped, not added. This project's board
@@ -297,9 +298,34 @@ def match_to_board(source: pd.DataFrame, crosswalk: pd.DataFrame, source_label: 
     return merged.dropna(subset=["join_key"]).drop_duplicates(subset="join_key", keep="first")
 
 
+# User's explicit choice (2026-08-31): our own model and CSI count HALF as
+# much as Dataroma/Barrett/Hansen in the blend - CSI is a single analyst's
+# positional-only tiered read (no overall rank, coarser granularity than
+# the other 3's per-player numeric ranks), and weighting our own model down
+# keeps the Consensus view an actual second opinion rather than one that's
+# implicitly half "us".
+SOURCE_WEIGHTS = {"our": 0.5, "dataroma": 1.0, "barrett": 1.0, "hansen": 1.0, "csi": 0.5}
+
+
+def weighted_mean(df: pd.DataFrame, cols: list[str], weights: list[float]) -> pd.Series:
+    """Weighted row-wise average across `cols`, skipping null values the
+    same way pandas' own `.mean(skipna=True)` does - a null value's weight
+    is excluded from the denominator too, not just its contribution to the
+    numerator, so a player ranked by only 2 of 5 sources isn't penalized
+    for the other 3's absence.
+    """
+    values = df[cols]
+    w = pd.Series(weights, index=cols)
+    mask = values.notna()
+    numerator = values.fillna(0).mul(w, axis=1).sum(axis=1)
+    denominator = mask.mul(w, axis=1).sum(axis=1)
+    return numerator / denominator
+
+
 def build_composite_board(board: pd.DataFrame, dataroma: pd.DataFrame, barrett: pd.DataFrame, hansen: pd.DataFrame, csi: pd.DataFrame) -> pd.DataFrame:
     """Blend our own board with the 4 external sources - see module
     docstring for the full methodology and the two-composite-number design.
+    Weighted per SOURCE_WEIGHTS, not a plain average - see that constant.
     """
     crosswalk = build_board_crosswalk(board)
 
@@ -329,10 +355,13 @@ def build_composite_board(board: pd.DataFrame, dataroma: pd.DataFrame, barrett: 
     out = out.drop(columns=["join_key", "normalized_name"])
 
     pct_cols = ["our_position_pct", "dataroma_position_pct", "barrett_position_pct", "hansen_position_pct", "csi_position_pct"]
-    out["consensus_position_pct"] = out[pct_cols].mean(axis=1, skipna=True)
+    pct_weights = [SOURCE_WEIGHTS["our"], SOURCE_WEIGHTS["dataroma"], SOURCE_WEIGHTS["barrett"],
+                   SOURCE_WEIGHTS["hansen"], SOURCE_WEIGHTS["csi"]]
+    out["consensus_position_pct"] = weighted_mean(out, pct_cols, pct_weights)
     out["n_sources"] = out[pct_cols].notna().sum(axis=1)
 
     overall_cols = ["our_overall_rank", "dataroma_overall_rank", "barrett_overall_rank", "hansen_overall_rank"]
-    out["consensus_overall_rank"] = out[overall_cols].mean(axis=1, skipna=True)
+    overall_weights = [SOURCE_WEIGHTS["our"], SOURCE_WEIGHTS["dataroma"], SOURCE_WEIGHTS["barrett"], SOURCE_WEIGHTS["hansen"]]
+    out["consensus_overall_rank"] = weighted_mean(out, overall_cols, overall_weights)
 
     return out.sort_values("consensus_overall_rank", na_position="last").reset_index(drop=True)
