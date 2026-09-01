@@ -3791,3 +3791,114 @@ monotonicity in both views, search/position/scoring filters, the drafted checkbo
 null-id collision fix. All 23 passed before publishing. Republished to the same Artifact URL (a675377a...,
 `consensus-view+draft-tracker` label) rather than creating a new one, so the user's existing link keeps working.
 
+### 2026-08-31 (cont'd) - sticky-header bug fixed for real; composite board join-key bug found and fixed; table redesigned as a frozen-column bounded panel
+
+User reported the sticky header was STILL overlapping row 4 after the previous "fix." Rather than guess again,
+verified in a real browser (jsdom, used for the earlier functional tests, does NOT do real CSS layout, so it
+could never have caught this) - see `artifact_sticky_header_lesson.md` (rewritten with the full root cause) for
+the durable version of this finding. Root cause: `.table-wrap`'s `overflow-x: auto` (needed for horizontal
+scroll on narrow viewports) silently became the CSS *containing block* for the sticky `<thead>` cells instead
+of the real page viewport - confirmed empirically (`getBoundingClientRect()` before/after toggling the
+ancestor's `overflow` to `visible`) rather than reasoned out abstractly, since the CSS spec behavior here is
+genuinely non-obvious. Fixed by moving the horizontal-scroll responsibility to `body` (which does NOT have
+this side effect - the root/initial containing block is special-cased) - verified pixel-correct via
+`getBoundingClientRect()` both at scroll=0 and mid-scroll, then confirmed visually on the live published
+Artifact (not just a local test file) before considering it done.
+
+**User's follow-up ask, anticipating a real future problem**: "I will add more sources, should we make the
+sources a horizontal scroll so we aren't widening the page? I will be using this on a laptop in a couple of
+days." Correctly identified that the just-fixed whole-page horizontal scroll would drag the Player/Team
+identity columns off-screen exactly when scrolling right to check source #6+, making the board unusable once
+more sources are added. Agreed and rebuilt `.table-wrap` as a genuine bounded-height, dual-axis scroll panel
+(`overflow: auto; max-height: calc(100vh - masthead - 24px)`) with the checkbox/#/Player/Team columns frozen
+(`position: sticky; left: ...`, explicit px widths so each column's cumulative offset is a known constant) -
+the standard "frozen header row + frozen leading columns" data-grid pattern. This ALSO simplified the sticky-
+header mechanism itself: `thead th` now sticks at `top: 0` relative to `.table-wrap` directly (no more
+`--masthead-h` var needed for the header's own position - that var still exists, just now feeds the panel's
+`max-height` instead). `body`'s `overflow-x: auto` from the prior fix was reverted since `.table-wrap` now
+owns all scrolling itself. Verified via `scrollLeft`/`scrollTop` manipulation + screenshots in a real browser
+(both axes scrolling simultaneously, row-expand still working, checkbox interactions unaffected) since this is
+exactly the class of bug (CSS layout, not JS logic) that a jsdom test suite cannot catch.
+
+**Separately, user flagged De'Zhaun Stribling ranking 734th in Consensus (effectively last) despite real ADP
+consensus in the top ~120, and named 5 more rookies (Singleton, Young, Royer, Burks, Beck) with no composite
+rankings at all.** Root-caused to the SAME already-documented 2026-UDFA-no-gsis_id population (see the
+2026-08-13 CLAUDE.md entry) interacting badly with the new composite-board pipeline specifically:
+`match_to_board`'s real-name match for these players correctly SUCCEEDED (Dataroma etc. do rank them), but the
+matched row still carried `player_id = NaN` (inherited from our own board's crosswalk), and the function's own
+`.dropna(subset=["player_id"])` - necessary elsewhere to avoid this project's recurring NaN-merge-fan-out bug
+class - discarded the row anyway, silently erasing real external rankings for these specific players. Fixed
+with `add_join_key` (`consensus.py`) - a merge key that falls back to normalized display name only when
+`player_id` is null, used everywhere `build_composite_board`/`match_to_board` merge, while leaving the real
+`player_id` column itself untouched everywhere else in the pipeline (this is a local, composite-board-only
+join convenience, not a claim these players now have a real gsis_id). Verified: Stribling's `consensus_
+overall_rank` went from missing/last-place to **119.75**, matching the user's own real-world estimate almost
+exactly. Match rates improved across the board as a side effect (Dataroma 195→196/198, Barrett 124→125/125 now
+100%, Hansen 198→200/200 now 100%, CSI 336→341/351) - confirms this wasn't a Stribling-specific patch, it was
+a real, general bug affecting the whole UDFA-rookie population. Regenerated both composite boards and
+`board_data.json`, republished the Artifact. One small residual gap left open, not chased: CSI's "Nick
+Singleton" doesn't fuzzy-match our board's "Nicholas Singleton" (below the 0.82 cutoff) - a nickname-matching
+problem, genuinely different from the null-id bug just fixed (Singleton now DOES have a real consensus rank
+via Hansen, just missing CSI's specific contribution) - flagged, not built, since it wasn't what was asked.
+
+### 2026-08-31 (cont'd) - table redesign, round 3: user rejected the boxed scroll panel; landed on split header/body
+
+User's reaction to the bounded-height panel (round 2, same day): "ooh no, i don't like that vertical scroll
+bar" / "i'm not a vertical scroll bar within a window kind of guy." Asked (via AskUserQuestion, since this was
+a genuine design-taste call, not something to infer) between 3 options - keep the boxed panel but style it
+down, drop frozen columns entirely, or rebuild as a split header/body table so the PAGE scrolls normally with
+no inner scrollbar. User picked the split option, then asked directly to "test that before you confirm
+changes" - a fair, explicit callback given the two prior "fixed it" claims that turned out incomplete.
+
+**Design**: `<thead>` now lives in its own `<table id="head-table">` inside `.thead-shell` (sticky, `top:
+var(--masthead-h)`, safe because .thead-shell's own ancestors have no overflow set - nothing hijacks ITS
+containing block); `<tbody>` lives in a separate `<table id="board-table">` inside `.tbody-shell`
+(`overflow-x: auto`, genuinely scrolls). A `scroll` listener mirrors `tbodyShell.scrollLeft` onto
+`theadShell.scrollLeft` so the two independently-rendered tables move together. Both tables need IDENTICAL
+column widths (`table-layout: fixed` + explicit `width` px on every th/td) since they're separate elements
+computing layout independently - added `width` to every entry in the shared `COLUMNS` config so header and
+body can never drift apart. Frozen columns (checkbox/#/Player/Team, `position: sticky; left: ...`) now stick
+relative to `.thead-shell`/`.tbody-shell` respectively, each a valid sticky containing block on its own
+terms - no conflict with the header's OWN top-stickiness, since that lives in a completely separate element.
+
+**Two more real browser bugs found and fixed during the requested testing pass - both would have been
+invisible without an ACTUAL browser (jsdom still can't do CSS layout, and turned out unable to help with the
+second one specifically either, see below):**
+1. `.tbody-shell`'s `overflow-x: auto` silently promotes `overflow-y` to `auto` too (the same spec rule
+   documented in `artifact_sticky_header_lesson.md`) - and even with NO actual vertical overflow to scroll,
+   simply HAVING `overflow-y: auto` made the element capture the mouse wheel at that hover position and
+   swallow vertical scroll gestures entirely, rather than letting them bubble to scroll the page. Confirmed
+   directly: scrolling with the mouse over the masthead moved the page; scrolling at the identical vertical
+   position but over the table did nothing. Fixed by setting `overflow-y: hidden` explicitly (harmless -
+   nothing ever actually overflows that axis, since `.tbody-shell` has no height constraint).
+2. That alone wasn't enough: even with `overflow-y: hidden` explicit, an element that GENUINELY has
+   horizontal overflow (i.e. exactly the real-world case - once there are enough source columns to actually
+   need scrolling) STILL swallows a vertical wheel gesture at that hover position, discarding it rather than
+   scrolling the page OR the table. Confirmed this precisely with a live browser test (not assumed): dispatch
+   a real `WheelEvent`, watch `window.scrollY` - stayed exactly 0 every time while hovering the table, moved
+   correctly when hovering the masthead. Fixed with a `wheel` listener on `.tbody-shell` that forwards
+   vertical-dominant gestures (`abs(deltaY) > abs(deltaX)`) to the page manually (`preventDefault()` +
+   `window.scrollBy(0, deltaY)`), letting genuinely horizontal gestures fall through to the table's own
+   native scroll untouched.
+
+**Real, honestly-reported limit of this session's testing, not glossed over**: the browser-automation tool
+used throughout this session (`claude-in-chrome`'s `computer` scroll action) does NOT dispatch real `'wheel'`
+DOM events at all - confirmed by attaching a listener and finding it captured ZERO events during a tool-
+driven scroll, even though the SAME tool action correctly moves `window.scrollY` and correctly triggers real
+`'scroll'` events elsewhere (used successfully to verify the header-sync mechanism). This means fix #2 above
+could NOT be verified end-to-end through this automated tool. What WAS directly verified: (a) the underlying
+browser bug is real (proven via the masthead-vs-table hover comparison), and (b) the fix's own logic is
+correct in isolation (dispatching a genuine synthetic `WheelEvent` with `deltaY: 400` moved `window.scrollY`
+by exactly 400, as designed). Real mouse/trackpad hardware always dispatches genuine `'wheel'` events before
+native scroll handling runs (standard web-platform behavior, not something in question) - high confidence
+the fix works for real usage, but this specific piece has NOT been confirmed with real hardware input the way
+everything else in this session was, and that gap was reported to the user directly rather than claimed as
+fully tested. `artifact_sticky_header_lesson.md` updated with the full 3-round history and this residual
+verification gap.
+
+Republished to the same Artifact URL (`split-header-no-boxed-scroll` label). Net result across this whole
+day's 3 rounds: sticky positioning correct in both axes, page scrolls normally with no inner scrollbar
+(satisfying the user's explicit preference), Player/Team frozen while source columns scroll horizontally
+(ready for the user's planned additional sources), and two more real, confirmed browser quirks fixed and
+documented for future sessions.
+

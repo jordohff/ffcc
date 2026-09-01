@@ -219,52 +219,82 @@ def add_position_pct(df: pd.DataFrame, rank_col: str, pct_col: str) -> pd.DataFr
     return df
 
 
+def add_join_key(df: pd.DataFrame, id_col: str = "player_id", normalized_name_col: str = "normalized_name") -> pd.DataFrame:
+    """A stable merge key that falls back to the normalized display name
+    when player_id is null - the ~7 known 2026 UDFA rookies with no
+    resolvable gsis_id (Carson Beck, Colbie Young, Oscar Delp, De'Zhaun
+    Stribling, Nicholas Singleton, Joe Royer, Deion Burks - see CLAUDE.md).
+
+    Using the raw (null) player_id as a merge key was silently discarding
+    these players' real external-source rankings even when a source clearly
+    ranked them - match_to_board's own name-based match succeeded (their
+    name matched fine), but the row still carried player_id=NaN forward,
+    and a later `.dropna(subset=["player_id"])` (needed elsewhere to avoid
+    the NaN-merge-fan-out bug this project has hit repeatedly) threw it away
+    regardless. Confirmed concretely: Dataroma/Barrett/Hansen/CSI all rank
+    De'Zhaun Stribling in a normal, real range (top ~150), but he showed up
+    at composite rank 734 (effectively last) purely from this join failure,
+    not from the sources actually rating him that low.
+
+    Not used as a replacement for player_id anywhere outside this module -
+    it's a local, composite-board-only join convenience, not a claim that
+    these players now have a real gsis_id.
+    """
+    df = df.copy()
+    df["join_key"] = df[id_col].fillna(df[normalized_name_col])
+    return df
+
+
 def build_board_crosswalk(board: pd.DataFrame) -> pd.DataFrame:
-    """normalized_name -> player_id/position lookup from OUR OWN already-
-    built draft board - the composite board is anchored to this player set
-    (see module docstring). Deduplicated by normalized_name (same
+    """normalized_name -> player_id/join_key/position lookup from OUR OWN
+    already-built draft board - the composite board is anchored to this
+    player set (see module docstring). Deduplicated by normalized_name (same
     precedent/caveat as paid_data.build_name_crosswalk: rare name
     collisions aren't resolved, first match wins).
     """
     cw = board[["player_id", "player_display_name", "position"]].copy()
     cw["normalized_name"] = cw["player_display_name"].map(_normalize_name)
+    cw = add_join_key(cw)
     return cw.drop_duplicates(subset="normalized_name", keep="first")
 
 
 def match_to_board(source: pd.DataFrame, crosswalk: pd.DataFrame, source_label: str, fuzzy_cutoff: float = 0.82) -> pd.DataFrame:
-    """Match a parsed external source onto our board's player_id: exact
+    """Match a parsed external source onto our board's join_key: exact
     normalized-name match first (name only, matching this project's
     existing paid-data precedent), then a FUZZY (difflib) fallback
     RESTRICTED TO THE SAME POSITION for anything left unmatched - covers
     real, verified name corruption (the CSI PDF's dropped ligatures) without
     risking a cross-position false positive, which is where fuzzy matching's
     real risk lives. Reports the real match rate and lists unmatched names,
-    rather than assuming the merge worked.
+    rather than assuming the merge worked. Matches (and reports) on
+    join_key, not raw player_id - see add_join_key's docstring for why.
     """
-    merged = source.merge(crosswalk[["normalized_name", "player_id"]], on="normalized_name", how="left")
+    merged = source.merge(crosswalk[["normalized_name", "player_id", "join_key"]], on="normalized_name", how="left")
 
     fuzzy_hits = 0
-    unmatched_mask = merged["player_id"].isna()
+    unmatched_mask = merged["join_key"].isna()
     for pos in merged.loc[unmatched_mask, "position"].unique():
         pool = crosswalk[crosswalk["position"] == pos]
         choices = pool["normalized_name"].tolist()
+        name_to_key = dict(zip(pool["normalized_name"], pool["join_key"]))
         name_to_id = dict(zip(pool["normalized_name"], pool["player_id"]))
         rows = merged[unmatched_mask & (merged["position"] == pos)]
         for idx, row in rows.iterrows():
             close = difflib.get_close_matches(row["normalized_name"], choices, n=1, cutoff=fuzzy_cutoff)
             if close:
+                merged.loc[idx, "join_key"] = name_to_key[close[0]]
                 merged.loc[idx, "player_id"] = name_to_id[close[0]]
                 fuzzy_hits += 1
 
-    matched_n = int(merged["player_id"].notna().sum())
+    matched_n = int(merged["join_key"].notna().sum())
     print(f"  {source_label}: {matched_n}/{len(merged)} matched to our board ({fuzzy_hits} via fuzzy fallback)")
-    still_missing = merged.loc[merged["player_id"].isna(), "raw_name"].tolist()
+    still_missing = merged.loc[merged["join_key"].isna(), "raw_name"].tolist()
     if still_missing:
         shown = still_missing[:15]
         suffix = f" ... (+{len(still_missing) - 15} more)" if len(still_missing) > 15 else ""
         print(f"    unmatched ({len(still_missing)}): {shown}{suffix}")
 
-    return merged.dropna(subset=["player_id"]).drop_duplicates(subset="player_id", keep="first")
+    return merged.dropna(subset=["join_key"]).drop_duplicates(subset="join_key", keep="first")
 
 
 def build_composite_board(board: pd.DataFrame, dataroma: pd.DataFrame, barrett: pd.DataFrame, hansen: pd.DataFrame, csi: pd.DataFrame) -> pd.DataFrame:
@@ -274,6 +304,8 @@ def build_composite_board(board: pd.DataFrame, dataroma: pd.DataFrame, barrett: 
     crosswalk = build_board_crosswalk(board)
 
     out = board.copy()
+    out["normalized_name"] = out["player_display_name"].map(_normalize_name)
+    out = add_join_key(out)
     out["our_overall_rank"] = out["vbd"].rank(ascending=False, method="min")
     out["our_position_pct"] = out["position_rank"] / out.groupby("position")["position_rank"].transform("count")
 
@@ -284,16 +316,17 @@ def build_composite_board(board: pd.DataFrame, dataroma: pd.DataFrame, barrett: 
 
     matched = {
         "dataroma": (match_to_board(dataroma, crosswalk, "Dataroma"),
-                     ["player_id", "dataroma_overall_rank", "dataroma_tier", "dataroma_position_rank", "dataroma_position_pct"]),
+                     ["join_key", "dataroma_overall_rank", "dataroma_tier", "dataroma_position_rank", "dataroma_position_pct"]),
         "barrett": (match_to_board(barrett, crosswalk, "Barrett"),
-                    ["player_id", "barrett_overall_rank", "barrett_position_rank", "barrett_position_pct"]),
+                    ["join_key", "barrett_overall_rank", "barrett_position_rank", "barrett_position_pct"]),
         "hansen": (match_to_board(hansen, crosswalk, "Hansen"),
-                   ["player_id", "hansen_overall_rank", "hansen_position_rank", "hansen_position_pct"]),
+                   ["join_key", "hansen_overall_rank", "hansen_position_rank", "hansen_position_pct"]),
         "csi": (match_to_board(csi, crosswalk, "CSI"),
-                ["player_id", "csi_position_rank", "csi_tier", "csi_position_pct"]),
+                ["join_key", "csi_position_rank", "csi_tier", "csi_position_pct"]),
     }
     for _, (df, cols) in matched.items():
-        out = out.merge(df[cols], on="player_id", how="left")
+        out = out.merge(df[cols], on="join_key", how="left")
+    out = out.drop(columns=["join_key", "normalized_name"])
 
     pct_cols = ["our_position_pct", "dataroma_position_pct", "barrett_position_pct", "hansen_position_pct", "csi_position_pct"]
     out["consensus_position_pct"] = out[pct_cols].mean(axis=1, skipna=True)
