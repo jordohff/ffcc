@@ -1,10 +1,11 @@
 """Build a composite (consensus) draft board blending this project's own
-model with 4 trusted external ranking sources the user supplied: Dataroma,
-Scott Barrett (FantasyPoints), John Hansen (FantasyPoints), and The
-Coachspeak Index (Greg Brainos). Weighted per consensus.SOURCE_WEIGHTS, per
-the user's explicit choice (2026-08-31) - see src/ffmodel/consensus.py for
-the full blending methodology and per-source caveats (scoring format,
-positional-only CSI).
+model with 6 trusted external ranking sources the user supplied: Dataroma,
+Scott Barrett (FantasyPoints), John Hansen (FantasyPoints), The Coachspeak
+Index (Greg Brainos), Joel Smyth, and Hayden Winks. Weighted per
+consensus.SOURCE_WEIGHTS, per the user's explicit choice (2026-08-31,
+Smyth/Winks added 2026-09-01) - see src/ffmodel/consensus.py for the full
+blending methodology and per-source caveats (scoring format, positional-
+only CSI).
 
 Run build_draft_rankings.py first (for the scoring format you want) - this
 script reads its already-written output CSV rather than rebuilding the
@@ -20,7 +21,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from ffmodel.consensus import build_composite_board, load_barrett, load_csi, load_dataroma, load_hansen
+from ffmodel.consensus import (
+    build_composite_board, load_barrett, load_csi, load_dataroma, load_hansen, load_smyth, load_winks,
+)
 
 BOARD_DIR = Path(__file__).resolve().parents[1] / "output" / "draft_rankings"
 SOURCE_DIR = Path(__file__).resolve().parents[1] / "data" / "paid" / "ConsensusRankings"
@@ -37,12 +40,17 @@ DATAROMA_FILES = {
 BARRETT_FILE = "rankings.redraft.barrett.csv"
 HANSEN_FILE = "rankings.redraft.top-200.csv"
 CSI_FILE = "CSI 2026 Redraft Rankings (half-PPR).pdf"
+# Smyth and Winks, like Dataroma, publish a real scoring-specific export for
+# both formats (added 2026-09-01) - same per-scoring file-selection pattern
+# as DATAROMA_FILES above, no fallback needed since both formats exist.
+SMYTH_FILES = {"half_ppr": "Smyth Half PPR Ranks.docx", "ppr": "Smyth full PPR Ranks.docx"}
+WINKS_FILES = {"half_ppr": "Winks Half PPR 2026 Ranks.docx", "ppr": "Winks PPR 2026 Ranks.docx"}
 
 DISPLAY_COLS = [
     "player_display_name", "position", "team",
     "consensus_overall_rank", "our_overall_rank",
     "dataroma_overall_rank", "barrett_overall_rank", "hansen_overall_rank",
-    "csi_position_rank", "csi_tier",
+    "smyth_overall_rank", "winks_overall_rank", "csi_position_rank", "csi_tier",
     "consensus_position_pct", "n_sources",
 ]
 
@@ -72,7 +80,10 @@ def main() -> None:
         print(f"  No {args.scoring}-specific Dataroma file ({dataroma_file}) - falling back to the PPR export")
         dataroma_file = DATAROMA_FILES["ppr"]
 
-    for f in [dataroma_file, BARRETT_FILE, HANSEN_FILE, CSI_FILE]:
+    smyth_file = SMYTH_FILES[args.scoring]
+    winks_file = WINKS_FILES[args.scoring]
+
+    for f in [dataroma_file, BARRETT_FILE, HANSEN_FILE, CSI_FILE, smyth_file, winks_file]:
         if not (SOURCE_DIR / f).exists():
             raise SystemExit(f"Missing {SOURCE_DIR / f} - check data/paid/ConsensusRankings/")
 
@@ -81,10 +92,13 @@ def main() -> None:
     barrett = load_barrett(str(SOURCE_DIR / BARRETT_FILE))
     hansen = load_hansen(str(SOURCE_DIR / HANSEN_FILE))
     csi = load_csi(str(SOURCE_DIR / CSI_FILE))
-    print(f"  Dataroma: {len(dataroma)} players, Barrett: {len(barrett)}, Hansen: {len(hansen)}, CSI: {len(csi)}")
+    smyth = load_smyth(str(SOURCE_DIR / smyth_file))
+    winks = load_winks(str(SOURCE_DIR / winks_file))
+    print(f"  Dataroma: {len(dataroma)} players, Barrett: {len(barrett)}, Hansen: {len(hansen)}, "
+          f"CSI: {len(csi)}, Smyth: {len(smyth)}, Winks: {len(winks)}")
 
     print("\nMatching sources to our board...")
-    composite = build_composite_board(board, dataroma, barrett, hansen, csi)
+    composite = build_composite_board(board, dataroma, barrett, hansen, csi, smyth, winks)
 
     out_path = BOARD_DIR / f"composite_board_{args.draft_season}_{args.scoring}.csv"
     composite.to_csv(out_path, index=False)

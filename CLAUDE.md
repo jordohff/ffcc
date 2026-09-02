@@ -4223,6 +4223,58 @@ persistence, rank-stability across search, position-filter renumbering, draft-an
 view-toggle round trip) plus the real-browser check above for the one thing jsdom can't verify (actual
 CSS layout/hidden behavior). Republished the same Artifact URL, data unchanged.
 
+### 2026-09-01 (cont'd) - Smyth/Winks added as consensus sources; consensus columns simplified; checkbox fix
+
+User added Joel Smyth's and Hayden Winks's redraft rankings (both half-PPR and full-PPR .docx exports)
+to `data/paid/ConsensusRankings/`, same weight as Dataroma/Barrett/Hansen (1.0, vs. CSI's 0.5 and our
+own model's 0.25 - see `SOURCE_WEIGHTS`). Both files share an identical, simple structure (a 4-column
+Rank/Player/Position/Team Word table, one player per row) - confirmed before writing one shared
+`load_docx_rankings` loader instead of two near-duplicate ones. Parsed via the same zipfile+XML
+approach already used for `coachspeak.py`'s Discord export (not imported from there - kept local to
+consensus.py, since that helper is private to a module with a different job) - no new dependency.
+Match rates: Smyth 150/150 (perfect - a shallower, higher-confidence list); Winks 259/304, with the 45
+unmatched confirmed as entirely K/DST (positions this project doesn't track) plus 3 real players
+(Phil Mafah, Jarquez Hunter, Emari Demercado) correctly showing team="FA" - free agents post-cutdown,
+not on our board for the same reason they're not on anyone else's roster right now.
+
+`build_composite_board` now blends 7 sources total (our model + 6 external). Composite CSVs
+(`composite_board_2026_*.csv`) still carry every source's own rank in full, for any future spot-check -
+only the ARTIFACT's embedded payload changed.
+
+**User's second request, implemented in the same pass: stop showing one column per external source in
+the Consensus view - just show the blended Consensus number - and add our own projected PPG as a
+column.** With 7 sources now, one-column-per-source was heading toward genuinely unusable clutter on
+top of the general decluttering the user asked for. New Consensus columns: `#`, Player, Team, PPG (our
+own `ppg_pred`), Consensus, Src. `COMPOSITE_COLS` in `build_board_artifact_data.py` trimmed to just
+`player_id, player_display_name, consensus_overall_rank, consensus_position_pct, n_sources` - the
+per-source rank columns are no longer embedded in the artifact's JSON at all (board_data.json actually
+SHRANK, 1651KB -> 1293KB, despite adding 2 more sources, purely from no longer carrying their per-source
+detail). Removed the now-dead `csiCell` helper and trimmed `ASCENDING_DEFAULT` to match, rather than
+leaving unused references around.
+
+**Real bug caught by the jsdom regression suite before publishing, not after**: the row-render code
+unconditionally read `cols[4]/cols[5]/cols[6].width` for every row regardless of view, which threw
+`Cannot read properties of undefined` the instant Consensus view (now only 6 columns, indices 0-5) was
+selected - a direct consequence of shrinking the column array without checking every place that indexed
+into it by a hardcoded position. Fixed by guarding those lookups (`cols[4] ? ... : ''`). Also hardened
+the test harness itself while catching this: it was reporting a clean "26 passed, 0 failed" even with
+this exact runtime exception firing (only console.error, not a failed assertion) - added an explicit
+window `error` listener that fails the suite on any uncaught exception, not just on assertion mismatches,
+so a real bug like this can't hide behind a green test run again.
+
+**User's third report, fixed in the same pass: a stray dot rendering in the lower-right corner of every
+checkbox on mobile.** Root cause: a bare native `<input type="checkbox">` sized down to 15x15px with
+only `accent-color` set - a known rendering inconsistency on some mobile browsers at small custom
+sizes. Replaced with a fully custom-drawn checkbox (`appearance: none` + a CSS `::after` checkmark),
+which removes native rendering entirely rather than trying to patch around its quirks - verified
+end-to-end in a real browser (not just jsdom, which can't render CSS): unchecked state is a clean
+square with no artifact, and clicking still correctly drafts/hides a player and updates the drafted
+count, confirming the interaction logic wasn't affected by the visual rewrite.
+
+Verified with an extended jsdom suite (26 assertions, including 5 new ones for the simplified consensus
+columns and the no-uncaught-errors check) plus the real-browser checkbox/consensus-column check above.
+Regenerated both composite boards, `board_data.json`, and republished the same Artifact URL.
+
 ### 2026-08-31 (cont'd) - Dataroma half-PPR export wired in
 
 Previously the half-PPR composite board silently reused Dataroma's PPR export (only one file existed) - user

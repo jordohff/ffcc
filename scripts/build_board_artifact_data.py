@@ -29,11 +29,15 @@ MODEL_COLS = [
     "coachspeak_notes", "coachspeak_last_date", "reliability_injury", "reliability_depth_chart",
     "reliability_usage_workload", "reliability_transactions", "manual_override_note",
 ]
+# Trimmed 2026-09-01 (was one column per external source) at the user's
+# request - the Consensus view no longer shows a column per ranking, just
+# the blended Consensus number, so there's no reason to embed the rest in
+# the artifact's payload. The full per-source breakdown still lives in
+# composite_board_2026_*.csv (untouched, still every source's own rank) for
+# any future spot-check/investigation - only this artifact-facing slice
+# is narrower.
 COMPOSITE_COLS = [
-    "player_id", "player_display_name", "our_overall_rank", "dataroma_overall_rank", "dataroma_tier",
-    "dataroma_position_rank", "barrett_overall_rank", "barrett_position_rank", "hansen_overall_rank",
-    "hansen_position_rank", "csi_position_rank", "csi_tier", "consensus_overall_rank",
-    "consensus_position_pct", "n_sources",
+    "player_id", "player_display_name", "consensus_overall_rank", "consensus_position_pct", "n_sources",
 ]
 
 

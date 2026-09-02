@@ -17,6 +17,12 @@ Sources, as described by the user:
 - The Coachspeak Index / Greg Brainos: POSITIONAL ONLY (no overall rank),
   half-PPR, tiered (a blank line between rank groups = a real tier break,
   per the user). Delivered as a PDF, not a CSV - parsed via pdftotext.
+- Joel Smyth and Hayden Winks (added 2026-09-01): overall + derived position
+  rank, both half-PPR and full-PPR exports available (like Dataroma).
+  Delivered as .docx files (a simple 4-column Rank/Player/Position/Team
+  Word table) - parsed via the same zipfile+XML approach as coachspeak.py,
+  not a new dependency. Same weight as Dataroma/Barrett/Hansen (see
+  SOURCE_WEIGHTS), per the user's explicit instruction.
 
 Design choices, and why:
 - WEIGHTED across sources (see SOURCE_WEIGHTS) - started equal-weight
@@ -49,10 +55,14 @@ Design choices, and why:
 import difflib
 import re
 import subprocess
+import zipfile
+import xml.etree.ElementTree as ET
 
 import pandas as pd
 
 from .paid_data import _normalize_name
+
+_W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 POSITION_HEADERS = {"RB", "WR", "TE", "QB"}
 
@@ -155,6 +165,65 @@ def load_csi(pdf_path: str) -> pd.DataFrame:
     df = parse_csi_rankings(pdf_path)
     df["normalized_name"] = df["raw_name"].map(_normalize_name)
     return df
+
+
+def _extract_docx_table_cells(docx_path: str) -> list[str]:
+    """Flat, in-document-order list of paragraph text runs from a .docx -
+    reused (not shared/imported) from the same zipfile+XML approach already
+    used for coachspeak.py's Discord export, since that helper is private to
+    a module with a different job. Works for a simple Word TABLE export the
+    same way it works for plain paragraphs, since `w:p` appears inside table
+    cells too - each cell becomes one entry in document order.
+    """
+    with zipfile.ZipFile(docx_path) as z:
+        xml_bytes = z.read("word/document.xml")
+    root = ET.fromstring(xml_bytes)
+    cells = []
+    for p in root.iter(f"{_W_NS}p"):
+        texts = [t.text or "" for t in p.iter(f"{_W_NS}t")]
+        cells.append("".join(texts))
+    return cells
+
+
+def load_docx_rankings(docx_path: str, prefix: str) -> pd.DataFrame:
+    """Parse a simple 4-column Word-table ranking export (Rank / Player /
+    Position / Team, one player per row) into a DataFrame with
+    raw_name/position/team/{prefix}_overall_rank/{prefix}_position_rank.
+
+    Used for both Joel Smyth's and Hayden Winks's ranking exports (added
+    2026-09-01) - confirmed both share this exact structure (a leading
+    blank paragraph, a 4-cell header, then repeating rank/player/position/
+    team groups, a trailing blank) before writing one shared loader instead
+    of two near-duplicate ones. Position rank is DERIVED (not published),
+    same convention as load_barrett/load_hansen.
+    """
+    cells = _extract_docx_table_cells(docx_path)
+    # Drop leading/trailing blanks and the 4-cell header row.
+    cells = [c for c in cells if c != ""]
+    header, body = cells[:4], cells[4:]
+    if header != ["Rank", "Player", "Position", "Team"]:
+        raise ValueError(f"{docx_path}: unexpected header {header!r} - format may have changed")
+    if len(body) % 4 != 0:
+        raise ValueError(f"{docx_path}: body length {len(body)} isn't a multiple of 4 - format may have changed")
+    rows = [body[i:i + 4] for i in range(0, len(body), 4)]
+    df = pd.DataFrame(rows, columns=["overall_rank", "raw_name", "position", "team"])
+    df = df.rename(columns={"overall_rank": f"{prefix}_overall_rank"})
+    df[f"{prefix}_overall_rank"] = df[f"{prefix}_overall_rank"].astype(int)
+    df[f"{prefix}_position_rank"] = df.groupby("position")[f"{prefix}_overall_rank"].rank(method="first").astype(int)
+    df["normalized_name"] = df["raw_name"].map(_normalize_name)
+    return df
+
+
+def load_smyth(path: str) -> pd.DataFrame:
+    """Joel Smyth's redraft rankings (added 2026-09-01, same weight as
+    Dataroma/Barrett/Hansen - see SOURCE_WEIGHTS)."""
+    return load_docx_rankings(path, "smyth")
+
+
+def load_winks(path: str) -> pd.DataFrame:
+    """Hayden Winks's redraft rankings (added 2026-09-01, same weight as
+    Dataroma/Barrett/Hansen - see SOURCE_WEIGHTS)."""
+    return load_docx_rankings(path, "winks")
 
 
 def load_dataroma(path: str) -> pd.DataFrame:
@@ -313,7 +382,10 @@ def match_to_board(source: pd.DataFrame, crosswalk: pd.DataFrame, source_label: 
 # can't fully see yet - Kenneth Walker III and Jaylen Waddle cited as
 # concrete examples. Weighting our own model down keeps the Consensus view
 # an actual outside check rather than implicitly being mostly "us".
-SOURCE_WEIGHTS = {"our": 0.25, "dataroma": 1.0, "barrett": 1.0, "hansen": 1.0, "csi": 0.5}
+# Joel Smyth and Hayden Winks added 2026-09-01, same weight as Dataroma/
+# Barrett/Hansen per the user's explicit instruction.
+SOURCE_WEIGHTS = {"our": 0.25, "dataroma": 1.0, "barrett": 1.0, "hansen": 1.0, "csi": 0.5,
+                  "smyth": 1.0, "winks": 1.0}
 
 
 def weighted_mean(df: pd.DataFrame, cols: list[str], weights: list[float]) -> pd.Series:
@@ -331,8 +403,11 @@ def weighted_mean(df: pd.DataFrame, cols: list[str], weights: list[float]) -> pd
     return numerator / denominator
 
 
-def build_composite_board(board: pd.DataFrame, dataroma: pd.DataFrame, barrett: pd.DataFrame, hansen: pd.DataFrame, csi: pd.DataFrame) -> pd.DataFrame:
-    """Blend our own board with the 4 external sources - see module
+def build_composite_board(
+    board: pd.DataFrame, dataroma: pd.DataFrame, barrett: pd.DataFrame, hansen: pd.DataFrame,
+    csi: pd.DataFrame, smyth: pd.DataFrame, winks: pd.DataFrame,
+) -> pd.DataFrame:
+    """Blend our own board with the 6 external sources - see module
     docstring for the full methodology and the two-composite-number design.
     Weighted per SOURCE_WEIGHTS, not a plain average - see that constant.
     """
@@ -348,6 +423,8 @@ def build_composite_board(board: pd.DataFrame, dataroma: pd.DataFrame, barrett: 
     barrett = add_position_pct(barrett, "barrett_position_rank", "barrett_position_pct")
     hansen = add_position_pct(hansen, "hansen_position_rank", "hansen_position_pct")
     csi = add_position_pct(csi, "csi_position_rank", "csi_position_pct")
+    smyth = add_position_pct(smyth, "smyth_position_rank", "smyth_position_pct")
+    winks = add_position_pct(winks, "winks_position_rank", "winks_position_pct")
 
     matched = {
         "dataroma": (match_to_board(dataroma, crosswalk, "Dataroma"),
@@ -358,19 +435,26 @@ def build_composite_board(board: pd.DataFrame, dataroma: pd.DataFrame, barrett: 
                    ["join_key", "hansen_overall_rank", "hansen_position_rank", "hansen_position_pct"]),
         "csi": (match_to_board(csi, crosswalk, "CSI"),
                 ["join_key", "csi_position_rank", "csi_tier", "csi_position_pct"]),
+        "smyth": (match_to_board(smyth, crosswalk, "Smyth"),
+                  ["join_key", "smyth_overall_rank", "smyth_position_rank", "smyth_position_pct"]),
+        "winks": (match_to_board(winks, crosswalk, "Winks"),
+                  ["join_key", "winks_overall_rank", "winks_position_rank", "winks_position_pct"]),
     }
     for _, (df, cols) in matched.items():
         out = out.merge(df[cols], on="join_key", how="left")
     out = out.drop(columns=["join_key", "normalized_name"])
 
-    pct_cols = ["our_position_pct", "dataroma_position_pct", "barrett_position_pct", "hansen_position_pct", "csi_position_pct"]
+    pct_cols = ["our_position_pct", "dataroma_position_pct", "barrett_position_pct", "hansen_position_pct",
+                "csi_position_pct", "smyth_position_pct", "winks_position_pct"]
     pct_weights = [SOURCE_WEIGHTS["our"], SOURCE_WEIGHTS["dataroma"], SOURCE_WEIGHTS["barrett"],
-                   SOURCE_WEIGHTS["hansen"], SOURCE_WEIGHTS["csi"]]
+                   SOURCE_WEIGHTS["hansen"], SOURCE_WEIGHTS["csi"], SOURCE_WEIGHTS["smyth"], SOURCE_WEIGHTS["winks"]]
     out["consensus_position_pct"] = weighted_mean(out, pct_cols, pct_weights)
     out["n_sources"] = out[pct_cols].notna().sum(axis=1)
 
-    overall_cols = ["our_overall_rank", "dataroma_overall_rank", "barrett_overall_rank", "hansen_overall_rank"]
-    overall_weights = [SOURCE_WEIGHTS["our"], SOURCE_WEIGHTS["dataroma"], SOURCE_WEIGHTS["barrett"], SOURCE_WEIGHTS["hansen"]]
+    overall_cols = ["our_overall_rank", "dataroma_overall_rank", "barrett_overall_rank", "hansen_overall_rank",
+                    "smyth_overall_rank", "winks_overall_rank"]
+    overall_weights = [SOURCE_WEIGHTS["our"], SOURCE_WEIGHTS["dataroma"], SOURCE_WEIGHTS["barrett"],
+                        SOURCE_WEIGHTS["hansen"], SOURCE_WEIGHTS["smyth"], SOURCE_WEIGHTS["winks"]]
     out["consensus_overall_rank"] = weighted_mean(out, overall_cols, overall_weights)
 
     return out.sort_values("consensus_overall_rank", na_position="last").reset_index(drop=True)
