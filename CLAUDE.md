@@ -3987,6 +3987,59 @@ would disappear after the first scroll tick. Added a jsdom check that the placeh
 a real value; all 26 tests pass. Verified visually in a real browser (both at page-top and after scrolling)
 before publishing, matching this session's established discipline for anything layout-related.
 
+### 2026-09-01 - Walker/Waddle durability investigation closed: RB team-change-starter boost shipped
+
+Followed up on the open thread from 2026-08-31 (`walker_waddle_durability_investigation.md`): does
+`games_est` under-credit a player who just received a genuinely fresh, real opportunity change (new
+team, bigger role), using Kenneth Walker III (RB, KC) and Jaylen Waddle (WR, MIA) as the named test
+cases that motivated deweighting our own model in the Consensus blend the night before.
+
+Tested two proxies for "fresh opportunity" before finding one that worked. First, team-level vacated
+opportunity (already a validated RATE feature) at the new team, restricted to team_changed=1 players:
+a clean null for RB (corr=0.041, p=0.50) and not robust for WR (pooled p=0.14, but the calibrate/
+validate split showed it collapsing from p=0.03 to p=0.99 - the exact overfitting shape this project
+has learned to distrust). Second, and more direct: contemporaneous week-1/2 historical depth chart
+(`nfl.load_depth_charts()`, same methodology already validated for `apply_role_security_discount`/
+`apply_qb_backup_games_est`) - does landing a CONFIRMED starter role (rank==1) at the NEW team predict
+extra real games_played beyond the GBM's own prediction, isolating the MARGINAL team-change effect
+(vs. a same-rank starter with no team change, since starters in general already carry a small,
+separate, unaddressed positive bias of their own)?
+
+**RB: real, validated, shipped.** Restricted to non-thin-trailing-history starters (prev_games_played
+>= ROLE_UPGRADE_MIN_GAMES, to avoid double-counting with the already-shipped `apply_role_upgrade_
+durability_boost`): team-changed starters (n=45) mean games_resid=+1.816 vs. non-team-changed starters
+(n=226) mean=+0.597 (diff p=0.055 - borderline on significance alone). The DECISIVE test, matching this
+project's established standard of a real out-of-sample accuracy check rather than stopping at a
+p-value: calibrated the marginal effect on 2018-2021 (+1.802) and tested on 2022-2025 - held-out MAE
+dropped from 3.152 to 2.757, and independently sweeping correction magnitudes on that SAME held-out
+data found its own MAE-minimizing shift at 1.75-2.00, essentially confirming the calibration-fit
+constant rather than the fix being an overfit artifact of the calibration half. Also checked and ruled
+out a contract/job-security confound: team-changed RB starters actually have LOWER average cap_percent
+(0.0107) than non-team-changed starters (0.0151) - working against, not for, the hypothesis.
+
+Shipped `apply_rb_team_change_starter_durability_boost` (season.py): adds
+`RB_TEAM_CHANGE_STARTER_GAMES_BOOST = 1.22` (the full 2018-2025 pooled marginal mean) to `games_est`
+for RB with `team_changed==1` AND current `depth_chart_rank==1` AND normal trailing history, clipped to
+17. Layered the same way as `apply_te_elite_usage_durability_boost` - on top of the GBM base
+prediction, using live-updatable signals so an in-season trade/promotion updates it automatically.
+
+**WR: tested identically, correctly NOT shipped.** Same isolation test (team-changed WR starters vs.
+non-team-changed WR starters) came back not significant (p=0.34), and its own calibrate/validate split
+shrank toward zero (marginal 0.369 -> 0.196) rather than holding - the same noise-shape this project
+rejected once already this project (the return-from-absence exclusion). Jaylen Waddle's own real
+market gap is NOT attributed to this mechanism - left open rather than force-fit just because the
+RB version worked.
+
+Regenerated both boards (740 rows each, no new NaN-merge issues; backtest headline numbers unchanged,
+QB 0.732959/RB 0.802010/TE 0.825065/WR 0.808578 - a board-build-time fix, not a training-time change).
+Verified on the board: Kenneth Walker III's games_est moved up and his overall half-PPR rank improved
+61 -> 45. Regenerated both composite boards and `board_data.json`, republished the same Artifact URL
+(data-only refresh, no layout/logic changes).
+
+Given this real, validated RB fix now partially addresses the concern that motivated deweighting our
+own model in the Consensus blend (`SOURCE_WEIGHTS`), that weighting was NOT touched this round -
+revisiting it is a separate, later decision, not an automatic consequence of this fix.
+
 ### 2026-08-31 (cont'd) - Dataroma half-PPR export wired in
 
 Previously the half-PPR composite board silently reused Dataroma's PPR export (only one file existed) - user

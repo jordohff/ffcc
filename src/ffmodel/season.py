@@ -2741,6 +2741,90 @@ def apply_te_elite_usage_durability_boost(board: pd.DataFrame) -> pd.DataFrame:
     return board
 
 
+RB_TEAM_CHANGE_STARTER_GAMES_BOOST = 1.22
+"""Additive games_est boost for RB only - see apply_rb_team_change_starter_
+durability_boost's docstring for derivation and validation."""
+
+
+def apply_rb_team_change_starter_durability_boost(board: pd.DataFrame) -> pd.DataFrame:
+    """ADD a games_est boost for RB who both changed teams AND are the
+    CURRENT depth_chart_rank==1 starter at their new team, with a NORMAL
+    (not thin) trailing games-played history (prev_games_played >=
+    ROLE_UPGRADE_MIN_GAMES - the thin-history case is already handled by
+    apply_role_upgrade_durability_boost, and this gate deliberately
+    excludes it to avoid double-counting).
+
+    Found 2026-08-31 investigating user-flagged real market gaps: Kenneth
+    Walker III (RB, signed a record-setting free-agent deal to be KC's lead
+    back after a weak incumbent backfield) and Jaylen Waddle (WR, stepping
+    into a clearly larger role after Miami's offseason changes) both showed
+    a large gap between this project's own rank and every external
+    consensus source (Dataroma/Barrett/Hansen/CSI) - user's hypothesis:
+    games_est has low confidence for a player with a fresh, real
+    opportunity change a backward-looking trailing-stats model can't fully
+    see. `team_changed` is already a durability feature (see
+    DURABILITY_FEATURES), but it's a flat 0/1 that doesn't distinguish a
+    lateral/smaller move from a clearly bigger one.
+
+    Tested walk-forward (2018-2025, using the same contemporaneous week-1/2
+    historical depth-chart methodology already validated elsewhere in this
+    pipeline) whether landing a CONFIRMED starter role at a NEW team
+    predicts extra real games_played beyond what the GBM already predicts,
+    for RB and WR separately (matching this project's "don't blanket, check
+    by position" rule) - RESULT DIFFERS BY POSITION:
+
+    - RB: real, validated effect. Comparing team-changed RB starters against
+      RB starters with no team change (isolating the MARGINAL team-change
+      effect, not just "starters are under-predicted" - a real, separate,
+      already-known and NOT yet corrected baseline bias of its own):
+      team-changed starters (excluding the thin-history overlap population,
+      n=45) show mean games_resid=+1.816 vs. no-change starters (n=226)
+      mean=+0.597 (diff p=0.055 - borderline on significance alone, but the
+      DECISIVE test is a real, out-of-sample accuracy improvement, not just
+      a p-value: calibrating the marginal effect on 2018-2021 (+1.802) and
+      testing on 2022-2025 cut held-out MAE from 3.152 to 2.757 - a genuine,
+      substantial reduction, and a sweep of correction magnitudes on the
+      SAME held-out data independently found its own MAE-minimizing shift
+      at 1.75-2.00, essentially confirming the calibration-fit constant
+      rather than the fix being an overfit artifact. Also checked and ruled
+      out a contract/job-security confound: team-changed RB starters
+      actually have LOWER average cap_percent (0.0107) than non-team-
+      changed starters (0.0151) - if anything working AGAINST the
+      hypothesis, so this isn't just "well-paid players play more."
+
+    - WR: tested with the identical methodology, NOT shipped - the
+      corresponding diff (team-changed WR starters vs. non-team-changed WR
+      starters) was not significant (p=0.34) and its own calibrate/validate
+      split shrank toward zero (marginal 0.369 -> 0.196), the classic shape
+      of a noise-driven effect this project has learned to distrust (see
+      the reverted return-from-absence exclusion). Jaylen Waddle's own real
+      market gap is therefore NOT attributed to this specific mechanism -
+      left open, matching this project's discipline against shipping a fix
+      for a position the data doesn't support just because a same-shaped
+      fix worked for a different position.
+
+    Final constant (RB_TEAM_CHANGE_STARTER_GAMES_BOOST=1.22) is the full
+    2018-2025 pooled marginal mean (team-changed starter mean minus
+    no-change starter mean), matching this project's standard convention
+    for a validated, out-of-sample-confirmed additive correction.
+
+    Layered the same way as apply_te_elite_usage_durability_boost - on top
+    of the GBM base prediction, using live-updatable depth_chart_rank/
+    team_changed signals, so an in-season trade/depth-chart change updates
+    this automatically on the next data pull.
+    """
+    board = board.copy()
+    gate = (
+        (board["position"] == "RB")
+        & (board["team_changed"] == 1)
+        & (board["depth_chart_rank"] == 1)
+        & (board["prev_games_played"] >= ROLE_UPGRADE_MIN_GAMES)
+    ).fillna(False)
+    board.loc[gate, "games_est"] = (board.loc[gate, "games_est"] + RB_TEAM_CHANGE_STARTER_GAMES_BOOST).clip(upper=17)
+    board["total_points_pred"] = board["ppg_pred"] * board["games_est"]
+    return board
+
+
 def apply_role_upgrade_durability_boost(board: pd.DataFrame, max_games: int = 17) -> pd.DataFrame:
     """REPLACE games_est for a CURRENT starter (depth_chart_rank == 1) with a
     thin trailing games-played history (prev_games_played <

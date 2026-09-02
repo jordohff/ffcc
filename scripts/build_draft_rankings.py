@@ -41,6 +41,7 @@ from ffmodel.season import (
     apply_qb_backup_games_est,
     apply_qb_role_upgrade_boost,
     apply_qb_starter_floor,
+    apply_rb_team_change_starter_durability_boost,
     apply_role_security_discount,
     apply_role_upgrade_durability_boost,
     apply_te_elite_usage_durability_boost,
@@ -291,6 +292,7 @@ def main() -> None:
     board = apply_qb_role_upgrade_boost(board)
     board = apply_role_upgrade_durability_boost(board)
     board = apply_te_elite_usage_durability_boost(board)
+    board = apply_rb_team_change_starter_durability_boost(board)
 
     oc_path = COACHING_DIR / f"offensive_coordinators_{args.draft_season}.csv"
     if oc_path.exists():
