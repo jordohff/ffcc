@@ -4149,6 +4149,80 @@ discount on a new team. All three checked out as accurate; none needed further a
 Regenerated both boards (647 rows each), both composite boards, and `board_data.json`; republished the
 same Artifact URL (data-only refresh).
 
+### 2026-09-01 (cont'd) - Travis Hunter (and 12 others) recovered: a real, general fix for a career-long stat-tracking gap
+
+User flagged Travis Hunter (WR/CB, Jacksonville, real 2025 #2 overall pick) missing from the board.
+Confirmed the already-documented root cause (2026-08-31 entry) more precisely: his gsis_id
+(00-0040718) IS resolvable and consistent across `draft_picks` and `current_depth_chart` (real WR,
+JAX, pos_rank 4) - not a crosswalk bug - but `weekly_stats` has LITERALLY ZERO rows for him across all
+145 stat columns (offense and defense), for any week of his career. A genuine upstream gap in
+nflreadpy's own stat tracking, plausibly because he's a rare true two-way player the provider's
+classification doesn't cleanly bucket.
+
+This meant he fell through EVERY existing path: not the veteran model (needs a `target_season - 1`
+season_stats row - he has none, ever), not the 2026 rookie class (`current_picks` only looks at
+`draft_picks[season == target_season]` - he was drafted in 2025), and not `find_players_returning_
+from_lost_season` either (that function requires real games 2-3 seasons back to distinguish "returning
+from injury" from "career over" - a player who's NEVER had an NFL stat row obviously can't clear that
+bar, by design).
+
+Checked the real scope before fixing (matching this project's established practice): 13 real,
+currently-active players league-wide fit "drafted, zero career stats, active roster" - Hunter is the
+only draft-capital-significant, real-usage name in the group; the rest are legitimately thin
+(deep-round backup QBs who've never played, a longtime fullback whose real per-play production is too
+small to generate a qualifying row, buried TEs) and would be correctly near-worthless even if included.
+
+Shipped `find_players_missing_career_stats` (season.py): finds real, drafted QB/RB/WR/TE picks from
+ANY season before the target season with zero career `season_stats` rows who are on an active (not
+RET/CUT) target-season roster, and feeds them into the ROOKIE curve (not the veteran model - there's no
+trailing performance to condition a Ridge model on, same reasoning as a true rookie) via their real,
+if now-stale, draft pick. Wired into `build_draft_rankings.py` right where `current_picks` is built,
+concatenated in before `project_rookies`. Team resolution, depth-chart-rank merge, and role-security
+discount all apply automatically afterward via the existing pipeline (same as any other rookie/veteran
+row) - confirmed Hunter's real, current JAX/WR4 depth-chart slot flows through correctly.
+
+**Honest, stated limitation**: routing a second-year-plus player through the rookie curve is a bounded
+approximation, not a precise projection - it will systematically UNDER-credit real usage growth since
+being drafted that a curve calibrated on true FIRST-season outcomes has no way to see. Verified this is
+better than the alternative (complete invisibility), not that it's exact: Hunter now projects at
+overall rank 40 (half-PPR), ppg_pred 10.15, games_est 15.0 - a real, sensible WR4-role number, likely
+still conservative relative to his actual expected role given real reporting about Jacksonville's plans
+for him, but a defensible floor rather than a missing player.
+
+Regenerated both boards (660 rows each, +13 from the fix), both composite boards, and `board_data.json`;
+republished the same Artifact URL.
+
+### 2026-09-01 (cont'd) - collapsible controls row + static rank while searching
+
+Two mobile/UX fixes to the published draft-board Artifact, no data changes. (1) User reported only
+seeing ~8 players at a time on a phone - traced to the masthead's `.controls` row (search/scoring/
+view/position/drafted toggles) wrapping across multiple lines at narrow widths, which the already-
+sticky masthead+table-header mechanism (see `artifact_sticky_header_lesson.md`) then permanently
+reserves at the top of the viewport. Added a "Filters" toggle button that collapses the whole controls
+row via `.hidden` (which the platform's own injected `[hidden]{display:none!important}` reset makes
+authoritative over `.controls`'s own `display:flex` - confirmed this ONLY works because of that
+platform-supplied rule, not something a bare local HTML file would get for free, after a first local
+test without it gave a false "doesn't visually hide" result). Defaults collapsed on a narrow first-time
+viewport (`matchMedia('(max-width: 640px)')`), remembers an explicit user choice in localStorage from
+then on either way. Calls the existing `syncMastheadHeight()` on toggle so the sticky table header
+immediately follows the new, shorter masthead height - verified via a real browser (not just jsdom,
+which can't compute CSS layout): collapsing saved 79px of masthead height even at a wide desktop
+viewport where the controls fit on one line already; the real win is larger still at mobile widths
+where they'd otherwise wrap across 2-3 lines.
+
+(2) User reported the `#` rank column changing while typing into search - a real regression of the
+same static-rank property already shipped for drafting (2026-08-31): `currentRows()` was still
+filtering by the search query BEFORE assigning `_rank`, so narrowing the search re-numbered the
+remaining rows from 1. Fixed by moving the search filter to run AFTER rank assignment, same pattern
+already used for the drafted-hide filter - search and drafting both now just narrow which of the
+already-numbered rows are visible, neither renumbers anyone. Position filter still legitimately
+renumbers (unchanged) - it's a real, different ranked pool, not a display narrowing.
+
+Verified with an extended jsdom regression suite (21 assertions: filters-toggle collapse/expand/
+persistence, rank-stability across search, position-filter renumbering, draft-and-keep-others'-rank,
+view-toggle round trip) plus the real-browser check above for the one thing jsdom can't verify (actual
+CSS layout/hidden behavior). Republished the same Artifact URL, data unchanged.
+
 ### 2026-08-31 (cont'd) - Dataroma half-PPR export wired in
 
 Previously the half-PPR composite board silently reused Dataroma's PPR export (only one file existed) - user

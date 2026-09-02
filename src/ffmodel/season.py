@@ -1511,6 +1511,67 @@ def predict_durability(models: dict[str, Pipeline], rows: pd.DataFrame, max_game
     return preds
 
 
+def find_players_missing_career_stats(
+    season_stats: pd.DataFrame, draft_picks: pd.DataFrame, rosters: pd.DataFrame, target_season: int
+) -> pd.DataFrame:
+    """Find real, drafted QB/RB/WR/TE picks from ANY season before
+    `target_season` who have NEVER recorded a single season_stats row in
+    their whole career, but ARE on an active `target_season` roster (not
+    RET/CUT) - i.e. a real, currently-rostered player this pipeline has no
+    trailing performance data for at all, and never will via the normal
+    veteran path (which needs a `target_season - 1` row) or the rookie path
+    (which only looks at `target_season`'s own draft class).
+
+    Found 2026-09-01, investigating Travis Hunter's absence (WR/CB,
+    Jacksonville, real 2025 #2 overall pick) - confirmed his gsis_id
+    (00-0040718, resolvable via `current_depth_chart` and `draft_picks`, so
+    not a crosswalk problem) has ZERO rows anywhere in `weekly_stats`,
+    offense or defense, for any week - a genuine upstream gap in
+    nflreadpy's own stat tracking for him specifically (plausibly because
+    he's a rare true two-way player and the provider's classification
+    doesn't cleanly bucket him), not something fixable by re-joining. He
+    falls into the same structural hole `find_players_returning_from_lost_
+    season` was built to close, but for a different reason - that function
+    requires real games 2-3 seasons back to distinguish a genuine return
+    case from a finished career, and a rookie who's never had any NFL row
+    at all obviously can't clear that bar.
+
+    Checked the scope before building a fix, not just patching this one
+    name: 13 real players league-wide fit this shape (drafted, zero career
+    stats, currently active) - most are legitimately thin/irrelevant
+    (deep-round backup QBs who've never played a snap, a longtime fullback
+    with real per-play production too small to generate a qualifying stat
+    row, TEs buried on a depth chart) and would be correctly near-worthless
+    even if included. Hunter is the one name in this group that's actually
+    draft-capital-significant (pick 2 overall) and has real, current offensive
+    usage (JAX depth chart: WR, pos_rank 4) - but the fix is general, keyed
+    on the real underlying condition, not a name-driven special case.
+
+    Fed into the ROOKIE curve (fit_rookie_curve/project_rookies), not the
+    veteran model - same reasoning as a true rookie: there's no trailing
+    performance to condition a Ridge model on, so the pick->production
+    curve is the only usable signal, even though the pick number here is
+    stale (from a prior draft class, not this year's). This is an honest,
+    bounded approximation, not a precise projection - it will systematically
+    UNDER-credit a player like Hunter who has real usage growth since being
+    drafted that the rookie curve (calibrated on TRUE first-season outcomes)
+    has no way to see - a real, known limitation of routing a second-year-
+    plus player through a rookie-only curve, worth remembering rather than
+    treating the resulting number as precise.
+    """
+    picks = draft_picks[
+        (draft_picks["season"] < target_season)
+        & draft_picks["position"].isin(POSITION_VET_FEATURES)
+        & draft_picks["gsis_id"].notna()
+    ]
+    ever_had_stats = set(season_stats["player_id"])
+    active_roster = set(
+        rosters[(rosters["season"] == target_season) & (~rosters["status"].isin({"RET", "CUT"}))]["gsis_id"]
+    )
+    missing = picks[~picks["gsis_id"].isin(ever_had_stats) & picks["gsis_id"].isin(active_roster)]
+    return missing.sort_values("season").drop_duplicates(subset="gsis_id", keep="last")
+
+
 def build_rookie_training_table(season_stats: pd.DataFrame, draft_picks: pd.DataFrame) -> pd.DataFrame:
     """Find each drafted player's actual rookie season (their first season
     with a recorded stat line matching their draft class year) and attach

@@ -65,6 +65,7 @@ from ffmodel.season import (
     compute_rookie_walk_forward_residuals,
     compute_walk_forward_residuals,
     evaluate_rankings,
+    find_players_missing_career_stats,
     fit_durability_models_by_position,
     fit_rookie_curve,
     fit_vet_models_by_position,
@@ -191,6 +192,11 @@ def main() -> None:
     rookie_curve = fit_rookie_curve(rookie_table)
     outcome_range = compute_rookie_outcome_range(rookie_table)
     current_picks = draft_picks[draft_picks["season"] == args.draft_season]
+    missing_career_stats = find_players_missing_career_stats(season_stats, draft_picks, rosters, args.draft_season)
+    if not missing_career_stats.empty:
+        print(f"  {len(missing_career_stats)} real, active player(s) drafted in a prior season have "
+              f"NO career stats at all (a data gap, not a crosswalk issue) - projecting from draft capital")
+        current_picks = pd.concat([current_picks, missing_career_stats], ignore_index=True)
     rookie_board = project_rookies(current_picks, rookie_curve)
     rookie_board = add_rookie_outcome_range(rookie_board, outcome_range)
     rookie_board["total_points_pred"] = rookie_board["ppg_pred"] * rookie_board["games_est"]
