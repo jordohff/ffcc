@@ -23,8 +23,8 @@ from ffmodel.paid_data import _normalize_name
 BOARD_DIR = Path(__file__).resolve().parents[1] / "output" / "draft_rankings"
 
 MODEL_COLS = [
-    "player_id", "player_display_name", "position", "team", "ppg_pred", "games_est",
-    "total_points_pred", "vbd", "depth_chart_rank", "is_rookie", "current_injury_status",
+    "player_id", "player_display_name", "position", "team", "ppg_pred", "prev_ppg", "games_est",
+    "total_points_pred", "vbd", "depth_chart_rank", "is_rookie", "team_changed", "current_injury_status",
     "sim_p10", "sim_median", "sim_p90", "sim_bust_prob", "sim_boom_prob", "sim_full_season_prob",
     "coachspeak_notes", "coachspeak_last_date", "reliability_injury", "reliability_depth_chart",
     "reliability_usage_workload", "reliability_transactions", "manual_override_note",

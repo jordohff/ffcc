@@ -4275,6 +4275,48 @@ Verified with an extended jsdom suite (26 assertions, including 5 new ones for t
 columns and the no-uncaught-errors check) plus the real-browser checkbox/consensus-column check above.
 Regenerated both composite boards, `board_data.json`, and republished the same Artifact URL.
 
+### 2026-09-01 (cont'd) - prev_ppg + team-change/rookie flag added; row rendering refactored; Clear-all added
+
+User asked for three more Artifact changes: rename PPG to make clear it's the 2026 PREDICTION, add a
+real 2025 PPG for comparison, add a column flagging a rookie or real team change, and (separately,
+urgently) a way to clear all checked draft boxes after finishing a real draft with 164 checked.
+
+**Real 2025 PPG added as an actual board column, not just an artifact-side lookup.** The board
+previously had no raw single-season PPG retained anywhere (only `wavg_ppg`, the model's own recency-
+weighted multi-season blend, which isn't the same number and isn't on the board CSV either). Added
+`prev_ppg` to `build_draft_rankings.py`: a direct merge of `season_stats[season == draft_season - 1]`'s
+real `ppg` onto `vet_board`, correctly NaN for true rookies and for the small "missing career stats"
+population (Travis Hunter et al. - see the earlier 2026-09-01 entry) since neither has a real 2025 row
+to pull from. This is a genuine board column now (in both CSVs), not an artifact-only hack - available
+for any future use beyond just this display.
+
+**Artifact columns**: renamed `PPG` -> `2026 PPG` and added `2025 PPG` (both views), plus a `New?`
+column (checkmark, hover shows "Rookie" or "New team") derived once at data-load time as
+`is_rookie || team_changed` for both scoring formats. `team_changed` had to be added to
+`MODEL_COLS` in `build_board_artifact_data.py` (it already existed on the board CSV, just wasn't
+embedded in the artifact's JSON before).
+
+**Refactored row rendering to eliminate an entire class of bug, not just re-fixed the same one again.**
+The prior column-index scheme (`w3`/`w4`/`w5`/`w6` + `cols[n].width` inline lookups, guarded ad hoc
+after the Smyth/Winks round broke it once already) would have needed a FOURTH guard variable the
+moment Our Board and Consensus diverged to 5 vs. 4 non-frozen columns this round - the same fragile
+shape, just with one more patch on top. Replaced entirely with `nonFrozenCellHtml(r, col)`, a function
+that switches on each column's own `sort` key rather than its position in the array - adding, removing,
+or reordering a column in `COLUMNS` can no longer produce an out-of-bounds read, since there's no
+positional index left to go out of bounds. Also hardened the test harness's own confidence in this:
+the jsdom suite already added a "no uncaught window errors" check in the previous round, which cleanly
+caught nothing needed fixing this time (34/34 passed, including 8 new assertions for the new columns
+and the Clear-all button) - direct evidence the earlier hardening was worth doing, not just a rerun.
+
+**Clear-all button**: a small button next to the drafted-toggle, hidden when nothing's drafted, using a
+double-click-to-confirm pattern (first click arms a "Sure? Click again" state for 4 seconds, second
+click within that window actually clears) rather than a native `confirm()` dialog, which would look
+out of place against this artifact's own theme and can't be styled. Verified end to end in a real
+browser: drafting, arming, and clearing all worked correctly and matched the jsdom assertions.
+
+Regenerated both boards, `board_data.json` (composite boards untouched - prev_ppg/team_changed don't
+touch the consensus blend), and republished the same Artifact URL.
+
 ### 2026-08-31 (cont'd) - Dataroma half-PPR export wired in
 
 Previously the half-PPR composite board silently reused Dataroma's PPR export (only one file existed) - user

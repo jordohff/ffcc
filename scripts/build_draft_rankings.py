@@ -178,11 +178,20 @@ def main() -> None:
     vet_board["ppg_pred"] = predict_vet_ppg(models, vet_board)
     vet_board["games_est"] = predict_durability(durability_models, vet_board)
     vet_board["total_points_pred"] = vet_board["ppg_pred"] * vet_board["games_est"]
+    # Real, actual PPG from the season right before the one being projected -
+    # display/context only (not a model feature - wavg_ppg, the recency-
+    # weighted multi-season blend, is what the model itself uses), added for
+    # the board so a human can see "predicted 2026" next to "actual 2025"
+    # directly rather than needing to cross-reference a separate source.
+    prev_ppg_lookup = season_stats[season_stats["season"] == args.draft_season - 1][["player_id", "ppg"]].rename(
+        columns={"ppg": "prev_ppg"}
+    )
+    vet_board = vet_board.merge(prev_ppg_lookup, on="player_id", how="left")
     vet_board = vet_board[
         ["player_id", "player_display_name", "position", "team", "age", "team_changed",
          "new_head_coach", "new_hc_prior_team_ppg", "prev_snap_share_trend", "prev_snap_share_level",
          "cap_percent", "sos_pts_allowed_pg", "ppg_pred", "games_est", "total_points_pred", "prev_games_played",
-         "wavg_target_share"]
+         "wavg_target_share", "prev_ppg"]
     ]
     vet_board["is_rookie"] = 0
     print(f"  {len(vet_board):,} returning players projected")
@@ -222,6 +231,12 @@ def main() -> None:
     # makes apply_te_elite_usage_durability_boost's wavg_target_share gate a
     # no-op for rookies (they're handled by the separate rookie curve).
     rookie_board["wavg_target_share"] = pd.NA
+    # No real 2025 PPG exists for a true rookie (display/context column, see
+    # vet_board's own prev_ppg) - also correctly NaN for the small number of
+    # non-rookies routed through this same curve for having zero career
+    # stats (find_players_missing_career_stats), since they have no
+    # season_stats row either, for the same reason.
+    rookie_board["prev_ppg"] = pd.NA
     # Unlike snap share/contract history, SOS only needs (team, season,
     # position) - not the player's own prior-season history - so it applies
     # to rookies just as well as veterans (rookies already have a team from
@@ -232,7 +247,7 @@ def main() -> None:
         ["player_id", "player_display_name", "position", "team", "age", "team_changed",
          "new_head_coach", "new_hc_prior_team_ppg", "prev_snap_share_trend", "prev_snap_share_level",
          "cap_percent", "sos_pts_allowed_pg", "ppg_pred", "games_est", "total_points_pred", "is_rookie",
-         "ppg_outcome_low", "ppg_outcome_high", "prev_games_played", "wavg_target_share"]
+         "ppg_outcome_low", "ppg_outcome_high", "prev_games_played", "wavg_target_share", "prev_ppg"]
     ]
     print(f"  {len(rookie_board):,} rookies projected")
 
