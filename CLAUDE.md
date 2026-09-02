@@ -4098,6 +4098,57 @@ stat model can validate, already partially surfaced via coachspeak). No code shi
 investigation - reported plainly rather than force-fitting a correction for one named player, matching
 this project's established discipline.
 
+### 2026-09-01 (cont'd) - live refresh: real roster-cutdown day, plus a Reserve-status bug that reopened the Watson-shaped gap
+
+Routine `refresh-board` skill run. Re-pulled injuries/Sleeper/rosters/current depth chart. This landed
+squarely on real 2026 NFL roster-cutdown day (Aug 29 - Sep 1) - the board's player count actually
+DROPPED from 740 to 639 on the first rebuild, a much bigger swing than a routine refresh normally
+produces, so investigated before trusting it rather than assuming it was fine because the backtest
+numbers were unchanged (they don't depend on live data at all, so they couldn't have caught this).
+
+**Real, expected churn**: 69 of the 101 disappeared players are genuinely `CUT` and 2 are `RET` -
+correctly excluded, matching real roster cutdown news (spot-checked Bailey Zappe via web search:
+confirmed cut by the Jets 8/29, signed to their practice squad 9/1 - practice-squad players correctly
+don't appear in nflverse's active-roster table at all, so this is accurate, not a data gap). 24 more
+lost their nflverse roster row entirely for the same reason (mostly deep-bench journeymen who didn't
+make a 53-man roster and aren't on any active team's practice squad either).
+
+**Real bug found and fixed: `find_players_returning_from_lost_season`'s `active_roster` filter required
+status == "ACT" specifically, not just "not RET/CUT."** This directly reopened the exact Deshaun-Watson-
+shaped gap that function was built to close on 2026-08-27, for the exact case it was built to handle -
+a player recovering from a lost season, sitting on a real Reserve designation (PUP/IR/NFI - RES in
+nflverse's status field) at the moment of a preseason roster snapshot. Confirmed directly: Tank Dell
+(HOU WR, zero 2025 games, literally cited as this function's own docstring example) disappeared the
+instant his 2026 status flipped ACT -> RES in this pull. 6 real players hit this (Tank Dell, Cole
+Turner, Johnny Wilson, Chris Collier, Irvin Charles, Skylar Thompson) - a real, current gap, not a
+one-off. The main board's own final filter (`EXCLUDED_STATUSES = {"RET", "CUT"}`) already treats
+Reserve/PUP/IR as worth ranking; this function's own gate was stricter than that without a stated
+reason and directly conflicted with the pipeline's own established philosophy for the one population it
+targets. Fixed to use the same RET/CUT-only exclusion (see the function's own docstring in season.py for
+the full writeup) - all 6 players correctly reappeared after the fix, board back to 647 rows (740 minus
+the 93 real cuts/retirements/practice-squad players).
+
+**Team-PPG-consistency check (the Watson-catching diagnostic): clean.** Every team has a real
+depth_chart_rank==1 QB row. 12 teams sit below the 4.06 historical-normal-ratio floor (BUF, KC, BAL,
+JAX, NE, LAC, GB, PHI, MIA, CLE, DAL, TB) - this matches the ALREADY-DOCUMENTED, accepted pattern from
+2026-08-27 (elite/rushing-QB teams trending below the old baseline, plausibly real league-wide QB-
+rushing growth since the ratio's 2010-2025 baseline was set) - not a new finding, not investigated
+further.
+
+**Verified the biggest real rank swings via web research rather than assuming the mechanism was
+right just because it changed something**: (1) Jadarian Price (SEA rookie RB, real pick 32 overall -
+corrected an earlier mistaken assumption that he was Arizona's pick, he was always Seattle's) is now
+real-news RB1 there (Spokesman, 9/1/26) with Zach Charbonnet dropped to RB4 - both moves are the
+role-security-discount mechanism working exactly as designed on real, confirmed news. (2) Jordyn Tyson
+(NO rookie WR, real 8th overall pick) dropped from depth-chart rank 2 to 5 - confirmed via web search
+he's on IR with a hamstring injury, out at least 4 games; the drop correctly reflects that, even though
+some outlets still list him as a "true" WR1 talent-wise. (3) Keenan Allen showing team=IND, confirmed
+real (signed with the Colts 8/19/26) - his rank-3 depth slot there correctly triggers the role-security
+discount on a new team. All three checked out as accurate; none needed further action.
+
+Regenerated both boards (647 rows each), both composite boards, and `board_data.json`; republished the
+same Artifact URL (data-only refresh).
+
 ### 2026-08-31 (cont'd) - Dataroma half-PPR export wired in
 
 Previously the half-PPR composite board silently reused Dataroma's PPR export (only one file existed) - user

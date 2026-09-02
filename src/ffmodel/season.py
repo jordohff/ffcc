@@ -1181,13 +1181,36 @@ def find_players_returning_from_lost_season(
     on this rare, thin-signal population risked destabilizing the model's
     coefficients for the much larger, well-behaved normal population with
     little benefit. This function only feeds the PREDICTION path.
+
+    BUG FOUND AND FIXED 2026-09-01, during a routine live-data refresh:
+    `active_roster` originally required status == "ACT" specifically, which
+    silently re-excludes exactly the population this function exists to
+    catch, the moment a real preseason roster-cutdown pull updates their
+    status to a non-CUT/RET reserve designation. Caught via the board-vs-
+    previous-board diff: Tank Dell (HOU WR, this function's own docstring
+    example of "hurt all year, on IR") disappeared from the board the
+    instant his 2026 status flipped from ACT to RES - the exact Watson-
+    shaped gap this function was built to close, reopened by a stricter
+    status filter than the rest of the pipeline uses. The main board's own
+    final status filter (EXCLUDED_STATUSES = {"RET", "CUT"} in
+    build_draft_rankings.py) already treats "still on an NFL roster in any
+    non-retired/non-cut capacity" as worth ranking - IR/PUP/Reserve
+    included, since that's precisely the state a real injury-recovery
+    return case sits in. This function's own gate was stricter than that
+    without a stated reason, and directly conflicted with it for the one
+    population it targets. Fixed to use the same RET/CUT-only exclusion,
+    so a real player toggling between ACT and a reserve designation (a
+    normal, frequent occurrence around roster cutdown and in-season IR
+    moves) no longer flips them on and off the board for a reason that has
+    nothing to do with whether they're actually still on the team.
     """
+    excluded = {"RET", "CUT"}
     had_prev = set(season_stats[season_stats["season"] == target_season - 1]["player_id"])
     had_earlier = set(
         season_stats[season_stats["season"].isin([target_season - 2, target_season - 3])]["player_id"]
     )
     active_roster = set(
-        rosters[(rosters["season"] == target_season) & (rosters["status"] == "ACT")]["gsis_id"]
+        rosters[(rosters["season"] == target_season) & (~rosters["status"].isin(excluded))]["gsis_id"]
     )
     returning_ids = (had_earlier - had_prev) & active_roster
     if not returning_ids:
