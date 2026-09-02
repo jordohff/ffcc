@@ -4040,6 +4040,64 @@ Given this real, validated RB fix now partially addresses the concern that motiv
 own model in the Consensus blend (`SOURCE_WEIGHTS`), that weighting was NOT touched this round -
 revisiting it is a separate, later decision, not an automatic consequence of this fix.
 
+### 2026-09-01 (cont'd) - destination-team-quality hypothesis tested and rejected; Waddle's gap traced to real, unresolvable uncertainty
+
+Direct follow-up to the RB durability fix. User pushed back on the WR null result on two fronts, both
+addressed with real numbers rather than reassurance:
+
+**Power check on the WR durability null.** Restricting to the same non-thin-history cohort used for
+the RB fix, WR team-changed starters (n=142) vs. non-team-changed (n=453): observed diff=0.202 games,
+95% CI=[-0.525, 0.929] - does NOT contain the RB-sized effect (1.219), and the minimum detectable
+effect at 80% power (0.983 games) is comfortably SMALLER than the RB effect size. Conclusion: this
+was not an underpowered test that missed a real effect - it had enough sensitivity to find an
+RB-sized effect and didn't. The WR null holds up.
+
+**Diagnosed Jaylen Waddle's own situation directly** (real, confirmed trade: Miami -> Denver, March
+2026, verified via web search) - and found he isn't even in the population the just-shipped RB fix's
+WR-equivalent would have covered: Denver's real current depth chart (`current_depth_chart.parquet`,
+8/30/26 snapshot) has Courtland Sutton at WR pos_rank 1, Waddle at pos_rank 2 - not a "confirmed
+starter" by the same gate used for the RB fix. His actual gap is a RATE issue, not durability: his real
+half-PPR PPG has been declining for two years (2021: 12.2 -> 2022: 13.0 -> 2023: 11.6 -> 2024: 8.0 ->
+2025: 10.1, verified directly from season_stats) - a real reflection of Miami's offensive decline, not
+a data error - so his `wavg_ppg` (9.81) is an accurate summary of real recent form, not a bug. Sutton's
+own wavg_ppg (11.12) is genuinely higher purely because HIS recent numbers were better (a real 2025
+bounce-back year) - a legitimate, mechanically-explainable reason the model doesn't yet see Waddle as
+the bigger receiver. On top of that, the flat `team_changed` coefficient (-1.07 for WR, matching the
+already-documented -1.27ish RB pattern) penalizes every team change identically regardless of whether
+it's a trade UP (bad situation -> good one) or down.
+
+**Tested the natural hypothesis this suggests: does the DESTINATION team's own recent (lagged,
+known-at-prediction-time) offensive quality predict extra signal for team-changed players, beyond what
+the flat team_changed flag and each player's own trailing stats already capture?** Built the feature
+from `compute_team_offensive_output` (already exists, used for coaching context) lagged by one season,
+merged onto the walk-forward Ridge `ppg_resid` for the team_changed=1 population (2018-2025). Clean,
+decisive null at every position: QB corr=-0.015 (p=0.84), RB corr=0.022 (p=0.71), WR corr=-0.034
+(p=0.48), TE corr=-0.026 (p=0.71), and pooled across all four (z-scored within position/season, n=1095)
+corr=-0.032 (p=0.29) - no signal anywhere, not even a borderline one. Not shipped. Matches this
+project's repeated finding that team-level context signals (O-line quality, team TE target share,
+incoming-competition, team touch-concentration philosophy) wash out once a player's own usage/trailing
+performance is already in the model - a good OFFENSE doesn't tell you whether a specific NEW arrival
+gets a big share of it, and the model has no way to observe that until it's actually happened.
+
+**Verified the qualitative side directly rather than dismissing it**: web search confirms real, current
+reporting (SI.com, Mile High Report, Yahoo Sports, Aug 2026) that Sean Payton has real, publicly-stated
+plans for Waddle including "Joker role" talk - but Payton HIMSELF "doesn't have a direct answer on
+whether Waddle will be receiver No. 1 or 2." This is genuinely, honestly uncertain even in real-time
+reporting, not a case where the model is missing an obvious, settled fact. This is the same class of
+gap already named and accepted elsewhere in this project (Bowers, Freiermuth/Tremble): real qualitative
+coaching intent that doesn't reduce to a clean statistical correction. The coachspeak overlay (shipped
+2026-08-30) already surfaces Waddle's real, positive quotes directly on the board as informational
+context - Payton's "real good after the catch... good at separating" comment and OC Davis Webb's "he's
+gonna play everywhere" comment are both already tagged and visible - which is the right, already-built
+treatment for exactly this situation, not something needing a new numeric fix.
+
+**Net conclusion**: two real, validated null results this round (WR durability power-checked and
+confirmed null; destination-team-quality tested and rejected at every position) plus one honestly-named
+open limitation (Waddle's real upside case rests on qualitative coaching intent no backward-looking
+stat model can validate, already partially surfaced via coachspeak). No code shipped from this
+investigation - reported plainly rather than force-fitting a correction for one named player, matching
+this project's established discipline.
+
 ### 2026-08-31 (cont'd) - Dataroma half-PPR export wired in
 
 Previously the half-PPR composite board silently reused Dataroma's PPR export (only one file existed) - user
