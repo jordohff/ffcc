@@ -22,12 +22,19 @@ from ffmodel.paid_data import _normalize_name
 
 BOARD_DIR = Path(__file__).resolve().parents[1] / "output" / "draft_rankings"
 
+# Coachspeak quotes/coach-reliability columns dropped 2026-09-01 at the
+# user's request (no longer shown in the row-detail panel - only the
+# simulated season range and bust/boom probability are) - trimmed from the
+# artifact's payload for the same reason the per-source consensus columns
+# were: no reason to embed data the page no longer displays. The
+# coachspeak overlay itself stays in build_draft_rankings.py/coachspeak.py
+# and on the CSV outputs, untouched - only this artifact-facing slice
+# changed.
 MODEL_COLS = [
     "player_id", "player_display_name", "position", "team", "ppg_pred", "prev_ppg", "games_est",
     "total_points_pred", "vbd", "depth_chart_rank", "is_rookie", "team_changed", "current_injury_status",
     "sim_p10", "sim_median", "sim_p90", "sim_bust_prob", "sim_boom_prob", "sim_full_season_prob",
-    "coachspeak_notes", "coachspeak_last_date", "reliability_injury", "reliability_depth_chart",
-    "reliability_usage_workload", "reliability_transactions", "manual_override_note",
+    "manual_override_note",
 ]
 # Trimmed 2026-09-01 (was one column per external source) at the user's
 # request - the Consensus view no longer shows a column per ranking, just

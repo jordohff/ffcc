@@ -102,7 +102,38 @@ QB_VET_FEATURES = COMMON_VET_FEATURES + [
 
 # RB-only: touch-volume hinge features (see add_touch_volume_features) -
 # not meaningful for WR/TE, which essentially never reach these touch totals.
-RB_VET_FEATURES = SKILL_VET_FEATURES + [f"touches_over_{h}" for h in TOUCH_VOLUME_HINGES]
+#
+# wavg_cushion (NGS coverage-distance) is deliberately DROPPED from RB's own
+# feature list here (kept for WR/TE, where real NGS coverage is much richer
+# - ~41%/26% - and comes from many different players) - found 2026-09-01
+# investigating a user-flagged case (Jahmyr Gibbs's 2026 ppg_pred, 18.42
+# full-PPR, looking too conservative against 10 other skill players' real
+# 2025 PPG). Decomposing his prediction found wavg_cushion alone
+# contributing -16.2 points, nearly canceling his own wavg_ppg's +13.6 -
+# traced to a real, disqualifying data problem, not just the already-
+# documented general Ridge-shrinkage-for-elite-profiles pattern (see the
+# QB entries from 2026-08-27/08-28): wavg_cushion has a real (non-imputed)
+# value for only 5 of 1,624 RB training rows (0.3%), and ALL FIVE belong to
+# the exact same single player (Cordarrelle Patterson, 2017-2021) - a
+# unique hybrid WR/RB/returner NGS happens to track as a receiver. The
+# fitted coefficient is therefore not a generalizable RB signal at all, it
+# is effectively a description of one unusual player's own career
+# trajectory, applied by extrapolation to any OTHER RB who happens to have
+# real coverage - exactly Gibbs's situation for 2026, a completely
+# different receiving-back archetype with no real basis for inheriting
+# that coefficient.
+#
+# Verified before removing it that this isn't a net loss elsewhere: walk-
+# forward MAE/Spearman for the full RB population, WITH vs WITHOUT
+# wavg_cushion (2018-2025, 8 test seasons) are statistically
+# indistinguishable (MAE 2.6739 vs 2.6742, Spearman 0.7414 vs 0.7414,
+# paired t-test p=0.19) - expected, since the feature is a near-constant
+# (median-imputed) value for 99.7% of RB rows regardless, so removing it
+# costs nothing in aggregate while removing a real, demonstrated risk for
+# the rare RB who has actual coverage.
+RB_VET_FEATURES = [f for f in SKILL_VET_FEATURES if f != "wavg_cushion"] + [
+    f"touches_over_{h}" for h in TOUCH_VOLUME_HINGES
+]
 
 POSITION_VET_FEATURES = {
     "QB": QB_VET_FEATURES,

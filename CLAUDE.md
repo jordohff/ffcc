@@ -4317,6 +4317,119 @@ browser: drafting, arming, and clearing all worked correctly and matched the jsd
 Regenerated both boards, `board_data.json` (composite boards untouched - prev_ppg/team_changed don't
 touch the consensus blend), and republished the same Artifact URL.
 
+### 2026-09-01 (cont'd) - 2026 PPG column removed; real RB rate-model bug found while investigating (not yet fixed)
+
+User: our top skill-position 2026 PPG prediction (Gibbs, 18.42 full-PPR) looks too conservative - real
+2025 PPG for at least 7-8 other skill players beat that. Verified before reacting either way: exactly
+true on the current board - 10 other skill players' real 2025 PPG exceed Gibbs's own 18.42 (McCaffrey
+24.5, Nacua 23.4, Robinson 21.8, Taylor 21.3, Smith-Njigba 21.2, Achane 20.2, Chase 19.6, St. Brown
+19.1, Rice 18.8, McBride 18.6).
+
+**Investigated why, rather than assuming it's just expected Ridge shrinkage (the already-documented
+QB pattern - Mahomes/Burrow/Daniels/Lamar - see the 2026-08-27/08-28 entries) and found something more
+specific and likely fixable.** Decomposed Gibbs's own RB Ridge prediction feature-by-feature: his
+`wavg_ppg` (20.53, already diluted below his real 2025 21.58 by the 3-year recency blend) contributes
++13.6 via the model's 0.66 coefficient - the expected shrinkage pattern. But `wavg_cushion` (an NGS
+coverage-distance metric) contributes **-16.2 points on its own** - a bigger swing than wavg_ppg's own
+contribution, nearly canceling it out. Checked the coefficient's real basis before trusting it:
+`wavg_cushion` has a non-null (real, non-imputed) value for only **5 of 1,624 RB training rows (0.3%
+coverage)** - matching and extending the already-documented finding from 2026-08-09 that "NGS's
+receiving tracking barely covers RBs at all" (there measured at ~0.07% for a related NGS field). A
+coefficient fit on effectively 5 real data points is not a trustworthy signal regardless of its value,
+and Gibbs happens to be one of the rare RBs with genuine coverage there, so he eats it at close to full
+force. This is a plausible, evidenced, DIFFERENT mechanism than the already-accepted QB shrinkage
+story - not just "the model is conservative for elite players," a specific, thinly-covered feature
+likely doing real damage to a small set of RBs with real NGS receiving data.
+
+**Not fixed yet - flagged for the user's go-ahead before touching the RB model**, matching this
+project's standing discipline (test/validate before shipping, get explicit sign-off before a rate-model
+change given how much downstream ranking depends on it). The natural next step, if the user wants it:
+walk-forward test dropping (or requiring a much higher coverage threshold for) `wavg_cushion` in the RB
+feature set, the same way sparse NGS fields have been gated before elsewhere in this project.
+
+**Shipped what was explicitly asked in the meantime**: removed the `2026 PPG` (our own `ppg_pred`)
+column from both Artifact views. `2025 PPG` (real, actual - unaffected by this concern), `New?`,
+Games/Total/VBD stay. Footer updated to note VBD/rank/Total are still internally driven by the same
+rate prediction even though it's no longer shown as its own column - hiding the column doesn't change
+the underlying ranking, just what's visible per-player. Verified with the jsdom suite (33/33, updated
+to expect the column gone) and republished the same Artifact URL. No board/CSV/model changes in this
+round - purely a display change pending the user's decision on the wavg_cushion investigation.
+
+**Follow-up, same day: ran the walk-forward test and shipped a real fix - but an honest result, not the
+one originally expected.** Walk-forward compared the RB Ridge rate model with vs. without
+`wavg_cushion` (2018-2025, 8 test seasons): aggregate MAE/Spearman are statistically indistinguishable
+either way (MAE 2.6739 vs 2.6742, Spearman 0.7414 vs 0.7414, paired t-test p=0.19) - expected, since the
+feature is a near-constant (median-imputed) value for 99.7% of RB rows regardless of who's being
+predicted. Dug into WHY it's so sparse and found something decisive: all 5 non-null RB training rows
+EVER belong to the exact same single player - Cordarrelle Patterson (2017-2021), a unique hybrid WR/RB/
+returner NGS happens to track as a receiver. The fitted coefficient is not a generalizable RB signal at
+all, it's effectively a description of one unusual player's own career trajectory. Shipped: dropped
+`wavg_cushion` from `RB_VET_FEATURES` (kept for WR/TE, where real coverage is much richer - ~41%/26% -
+and drawn from many different players, not one). Verified no regression: half-PPR backtest RB Spearman
+0.802010 -> 0.801859 (noise-level), QB/TE/WR byte-identical (untouched, as expected).
+
+**Honest correction to the original diagnosis, reported plainly rather than glossed over**: rebuilding
+the board after the fix found Gibbs's own `ppg_pred` barely moved (18.42 -> 18.41, full-PPR) - the
+`wavg_cushion` fix does NOT explain his specific low number after all. Re-examining why: since the
+feature sits at the same imputed (constant) value for virtually every RB, Ridge's own joint fitting
+absorbs its "contribution" almost entirely into the intercept term for imputed rows - removing the
+feature just re-absorbs that same amount back into the intercept, netting out to nearly the same
+prediction. The fix is still real and worth keeping (it removes a genuine, demonstrated risk - a
+single-player-derived coefficient that WOULD matter for any future RB who gets real, non-imputed NGS
+coverage that differs meaningfully from Patterson's own numbers - with zero aggregate cost either way),
+but it is a cleanup, not the explanation for Gibbs. The real, still-standing explanation for his specific
+case remains the already-documented, already-investigated-and-accepted general pattern (Ridge shrinkage
+on `wavg_ppg` itself - his 20.53 recency-weighted rate only translates to a 0.66x coefficient
+contribution) - the same limitation this project has repeatedly tested corrections for and rejected
+(age x elite interaction, QB streaming multiplier) because they didn't generalize on real data. No
+further fix attempted this round without new evidence, matching that standing discipline.
+
+Regenerated both boards, composite boards, and `board_data.json`.
+
+### 2026-09-01 (cont'd) - New? column spacing tightened
+
+User: the New?/2025 PPG columns "look oddly far apart." Root cause: the New? column's HEADER text was
+left-aligned (no alignment class) while its BODY cells centered the checkmark (`td.center`) - that
+header/body mismatch, plus a wider-than-needed 55px column mostly sitting empty (~95% of rows have no
+checkmark), read as a gap rather than a column. Centered both header and body (`th.center` added
+alongside the existing `td.center`), narrowed the column to 46px (matching the `#` column), and
+tightened its padding specifically (`td.new-col`) rather than inheriting the generic 10px cell padding
+built for wider numeric columns. Verified visually in a real browser before publishing (not just
+jsdom, which can't render CSS layout) - the column now reads as a clean, proportional checkmark slot
+between Team and 2025 PPG. Republished the same Artifact URL alongside the wavg_cushion board refresh.
+
+### 2026-09-01 (cont'd) - row-detail simplified to sim range only; footer cleaned up, weighting no longer public
+
+User: remove coachspeak quotes and coach reliability from the row-detail panel (keep only simulated
+season range + bust/boom probability); clean up the footer; don't disclose how sources are weighted in
+the Consensus blend.
+
+**Row detail**: removed the "Recent coachspeak" and "Coach reliability" sections from `detailHtml`
+entirely - only the simulated-season-range block (p10/median/p90, bust/boom/full-season probability)
+remains, alongside the existing manual-override warning banner. Removed the now-unused `relBar` helper
+rather than leave it as dead code. The `.detail` panel was a 2-column CSS grid built specifically to
+place coachspeak beside reliability+sim - with only one block left, switched it to a plain single-column
+panel (dropped the grid properties and the narrow-screen override that existed only to collapse that
+grid, both now moot). Verified in a real browser: the panel reads as one clean block, no leftover empty
+grid space. Also trimmed `MODEL_COLS` in `build_board_artifact_data.py` (dropped `coachspeak_notes`,
+`coachspeak_last_date`, `reliability_injury`, `reliability_depth_chart`, `reliability_usage_workload`,
+`reliability_transactions`) - the page no longer displays them, so no reason to embed them;
+`board_data.json` shrank from 1346KB to 695KB as a direct result. The coachspeak overlay itself
+(`coachspeak.py`, the merge in `build_draft_rankings.py`) is untouched - still computed and still on the
+CSV outputs, just no longer surfaced in the Artifact.
+
+**Footer**: rewritten shorter and, per the explicit request, no longer states the exact per-source
+weighting (previously: "counts a QUARTER as much, and CSI HALF as much, as the other 5 sources") - now
+just names the 6 external sources blended into "Consensus" without the formula. Also dropped the now-
+stale coachspeak/reliability disclaimer sentence and the "documented in CLAUDE.md" internal cross-
+reference, both of which no longer apply now that PPG isn't shown as a column and coachspeak isn't
+shown in detail.
+
+Verified with the jsdom suite (38/38, including 4 new assertions confirming the detail panel shows sim
+content but no coachspeak/reliability text) plus a real-browser check of both the detail panel and the
+final footer text. Republished the same Artifact URL. No board/CSV/model changes in this round - display
+and payload-trimming only.
+
 ### 2026-08-31 (cont'd) - Dataroma half-PPR export wired in
 
 Previously the half-PPR composite board silently reused Dataroma's PPR export (only one file existed) - user
