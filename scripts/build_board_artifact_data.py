@@ -48,6 +48,39 @@ COMPOSITE_COLS = [
 ]
 
 
+# K/DST rows have no model prediction at all (our model doesn't project
+# kickers/defenses - see consensus.build_kdst_consensus_board) - every
+# MODEL_COLS field except identity (player_id/name/position/team) is left
+# null/0 so these rows share the exact same shape the artifact's JS already
+# expects, rather than needing special-case handling there.
+KDST_MODEL_COL_DEFAULTS = {
+    "ppg_pred": None, "prev_ppg": None, "games_est": None, "total_points_pred": None, "vbd": None,
+    "depth_chart_rank": None, "is_rookie": 0, "team_changed": 0, "current_injury_status": None,
+    "sim_p10": None, "sim_median": None, "sim_p90": None, "sim_bust_prob": None, "sim_boom_prob": None,
+    "sim_full_season_prob": None, "manual_override_note": None,
+}
+
+
+def build_kdst_rows(scoring: str) -> list[dict]:
+    path = BOARD_DIR / f"composite_board_kdst_2026_{scoring}.csv"
+    if not path.exists():
+        print(f"  No {path.name} - skipping K/DST rows (run build_composite_board.py first)")
+        return []
+    kdst = pd.read_csv(path)[["player_display_name", "position", "team", "consensus_overall_rank",
+                               "consensus_position_pct", "n_sources"]].copy()
+    kdst["consensus_position_pct"] = kdst["consensus_position_pct"].round(4)
+    kdst["consensus_overall_rank"] = kdst["consensus_overall_rank"].round(2)
+    for col, default in KDST_MODEL_COL_DEFAULTS.items():
+        kdst[col] = default
+    # No real gsis_id for K/DST at all (our board never carries them) - the
+    # JS side's rowKey() already falls back to player_display_name whenever
+    # player_id is null (see the artifact's own comment on that function),
+    # same convention as the handful of UDFA-rookie null-id rows it already
+    # handles, so leaving this null (not synthesizing a fake id) is safe.
+    kdst["player_id"] = None
+    return json.loads(kdst[MODEL_COLS + ["consensus_overall_rank", "consensus_position_pct", "n_sources"]].to_json(orient="records"))
+
+
 def build_one(scoring: str) -> list[dict]:
     board = pd.read_csv(BOARD_DIR / f"draft_rankings_2026_{scoring}.csv")[MODEL_COLS]
     composite = pd.read_csv(BOARD_DIR / f"composite_board_2026_{scoring}.csv")[COMPOSITE_COLS]
@@ -79,7 +112,11 @@ def main() -> None:
     # not when the page was last published (those can differ if a
     # publish-only change, like a CSS fix, happens without new data).
     generated_at = datetime.now().strftime("%b %d, %Y, %I:%M %p")
-    data = {"generated_at": generated_at, "half_ppr": build_one("half_ppr"), "ppr": build_one("ppr")}
+    data = {
+        "generated_at": generated_at,
+        "half_ppr": build_one("half_ppr") + build_kdst_rows("half_ppr"),
+        "ppr": build_one("ppr") + build_kdst_rows("ppr"),
+    }
     out_path = BOARD_DIR / "board_data.json"
     out_path.write_text(json.dumps(data), encoding="utf-8")
     print(f"Wrote {out_path} ({out_path.stat().st_size / 1024:.0f} KB, "

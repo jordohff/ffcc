@@ -1,11 +1,16 @@
 """Build a composite (consensus) draft board blending this project's own
-model with 6 trusted external ranking sources the user supplied: Dataroma,
+model with 9 trusted external ranking sources the user supplied: Dataroma,
 Scott Barrett (FantasyPoints), John Hansen (FantasyPoints), The Coachspeak
-Index (Greg Brainos), Joel Smyth, and Hayden Winks. Weighted per
+Index (Greg Brainos), Joel Smyth, Hayden Winks, Jeff Bell, Sigmund Bloom,
+and Josh Norris - 10 sources total including our own model. Weighted per
 consensus.SOURCE_WEIGHTS, per the user's explicit choice (2026-08-31,
-Smyth/Winks added 2026-09-01) - see src/ffmodel/consensus.py for the full
-blending methodology and per-source caveats (scoring format, positional-
-only CSI).
+Smyth/Winks added 2026-09-01, Bell/Bloom/Norris added 2026-09-02) - see
+src/ffmodel/consensus.py for the full blending methodology and per-source
+caveats (scoring format, positional-only CSI).
+
+Also builds a SEPARATE K/DST-only consensus board (our own model doesn't
+project kickers or defenses at all - see consensus.build_kdst_consensus_board)
+from the 4 sources that actually rank K/DST: Bell, Bloom, Winks, Norris.
 
 Run build_draft_rankings.py first (for the scoring format you want) - this
 script reads its already-written output CSV rather than rebuilding the
@@ -22,7 +27,8 @@ from pathlib import Path
 import pandas as pd
 
 from ffmodel.consensus import (
-    build_composite_board, load_barrett, load_csi, load_dataroma, load_hansen, load_smyth, load_winks,
+    build_composite_board, build_kdst_consensus_board, load_barrett, load_bell, load_bloom, load_csi,
+    load_dataroma, load_hansen, load_norris, load_smyth, load_winks,
 )
 
 BOARD_DIR = Path(__file__).resolve().parents[1] / "output" / "draft_rankings"
@@ -45,13 +51,24 @@ CSI_FILE = "CSI 2026 Redraft Rankings (half-PPR).pdf"
 # as DATAROMA_FILES above, no fallback needed since both formats exist.
 SMYTH_FILES = {"half_ppr": "Smyth Half PPR Ranks.docx", "ppr": "Smyth full PPR Ranks.docx"}
 WINKS_FILES = {"half_ppr": "Winks Half PPR 2026 Ranks.docx", "ppr": "Winks PPR 2026 Ranks.docx"}
+NORRIS_FILES = {"half_ppr": "Norris Half PPR Ranks.docx", "ppr": "Norris Full PPR Ranks.docx"}
+# Bell and Bloom only provided a PPR export (added 2026-09-02) - reused for
+# both scoring formats, same fallback precedent as DATAROMA_FILES.
+BELL_FILE = "Jeff Bell PPR Ranks.xlsx"
+BLOOM_FILE = "Sigmund Bloom PPR ranks.xlsx"
 
 DISPLAY_COLS = [
     "player_display_name", "position", "team",
     "consensus_overall_rank", "our_overall_rank",
     "dataroma_overall_rank", "barrett_overall_rank", "hansen_overall_rank",
-    "smyth_overall_rank", "winks_overall_rank", "csi_position_rank", "csi_tier",
+    "smyth_overall_rank", "winks_overall_rank", "bell_overall_rank", "bloom_overall_rank",
+    "norris_overall_rank", "csi_position_rank", "csi_tier",
     "consensus_position_pct", "n_sources",
+]
+
+KDST_DISPLAY_COLS = [
+    "player_display_name", "position", "team", "consensus_overall_rank", "consensus_position_pct",
+    "bell_overall_rank", "bloom_overall_rank", "winks_overall_rank", "norris_overall_rank", "n_sources",
 ]
 
 
@@ -62,7 +79,8 @@ def main() -> None:
         help="Dataroma is loaded per-scoring (a real half-PPR export, if present - see DATAROMA_FILES). "
              "Hansen is confirmed PPR, Barrett is assumed PPR (not stated in its export) regardless of this "
              "flag - no half-PPR export exists for those yet. CSI is half-PPR regardless of this flag "
-             "(positional-only, no overall rank affected by scoring format the way point totals are).",
+             "(positional-only, no overall rank affected by scoring format the way point totals are). "
+             "Bell/Bloom are PPR-only (reused for both formats, no half-PPR export provided).",
     )
     parser.add_argument("--draft-season", type=int, default=2026)
     args = parser.parse_args()
@@ -82,8 +100,9 @@ def main() -> None:
 
     smyth_file = SMYTH_FILES[args.scoring]
     winks_file = WINKS_FILES[args.scoring]
+    norris_file = NORRIS_FILES[args.scoring]
 
-    for f in [dataroma_file, BARRETT_FILE, HANSEN_FILE, CSI_FILE, smyth_file, winks_file]:
+    for f in [dataroma_file, BARRETT_FILE, HANSEN_FILE, CSI_FILE, smyth_file, winks_file, norris_file, BELL_FILE, BLOOM_FILE]:
         if not (SOURCE_DIR / f).exists():
             raise SystemExit(f"Missing {SOURCE_DIR / f} - check data/paid/ConsensusRankings/")
 
@@ -94,11 +113,15 @@ def main() -> None:
     csi = load_csi(str(SOURCE_DIR / CSI_FILE))
     smyth = load_smyth(str(SOURCE_DIR / smyth_file))
     winks = load_winks(str(SOURCE_DIR / winks_file))
+    bell = load_bell(str(SOURCE_DIR / BELL_FILE))
+    bloom = load_bloom(str(SOURCE_DIR / BLOOM_FILE))
+    norris = load_norris(str(SOURCE_DIR / norris_file))
     print(f"  Dataroma: {len(dataroma)} players, Barrett: {len(barrett)}, Hansen: {len(hansen)}, "
-          f"CSI: {len(csi)}, Smyth: {len(smyth)}, Winks: {len(winks)}")
+          f"CSI: {len(csi)}, Smyth: {len(smyth)}, Winks: {len(winks)}, Bell: {len(bell)}, "
+          f"Bloom: {len(bloom)}, Norris: {len(norris)}")
 
     print("\nMatching sources to our board...")
-    composite = build_composite_board(board, dataroma, barrett, hansen, csi, smyth, winks)
+    composite = build_composite_board(board, dataroma, barrett, hansen, csi, smyth, winks, bell, bloom, norris)
 
     out_path = BOARD_DIR / f"composite_board_{args.draft_season}_{args.scoring}.csv"
     composite.to_csv(out_path, index=False)
@@ -106,6 +129,16 @@ def main() -> None:
 
     print("\nTop 40 by consensus overall rank:")
     print(composite[DISPLAY_COLS].head(40).round(2).to_string(index=False))
+
+    print("\nBuilding K/DST consensus (Bell/Bloom/Winks/Norris only - our model doesn't cover K/DST)...")
+    kdst = build_kdst_consensus_board(bell, bloom, winks, norris)
+    kdst_out_path = BOARD_DIR / f"composite_board_kdst_{args.draft_season}_{args.scoring}.csv"
+    kdst.to_csv(kdst_out_path, index=False)
+    print(f"Wrote {len(kdst)} rows to {kdst_out_path}")
+    print("\nTop 15 K, top 15 DST by consensus position pct:")
+    for pos in ["K", "DST"]:
+        print(f"-- {pos} --")
+        print(kdst[kdst["position"] == pos][KDST_DISPLAY_COLS].head(15).round(3).to_string(index=False))
 
 
 if __name__ == "__main__":

@@ -4444,3 +4444,96 @@ in half-PPR). Regenerated both composite boards + `board_data.json`, all 26 test
 Barrett and Hansen still have only one (assumed-PPR / confirmed-PPR) export each - same treatment as before,
 not changed this round.
 
+### 2026-09-02 - 3 more consensus sources (10 total), a standalone K/DST consensus, Consensus as default view
+
+User asked to add 3 more people's ranks "to get to 10" (our model + 9 external): Jeff Bell and Sigmund Bloom
+(PPR-only `.xlsx` exports, reused for both scoring formats - same fallback precedent as Dataroma), and Josh
+Norris (same 4-column docx format as Smyth/Winks, both scoring formats provided). `load_tiered_xlsx_rankings`
+(consensus.py, new) parses Bell/Bloom's shared format: a "Rank" column that's either a real overall-rank
+integer or a "Tier N" label row (no player of its own), "Player" combining name+team ("Ja'Marr Chase CIN" -
+team is always the trailing token, verified against a real suffix case, "Stetson Bennett IV LAR"), and "Pos"
+combining position+position-rank ("WR1", "PK28", "TD32" - this source's own kicker/defense labels, remapped
+to this project's "K"/"DST"). Deliberately reads the rank column POSITIONALLY (`row.iloc[0]`), not via
+`raw["Rank"]`, since the file also has a differently-purposed "Rank\nvs ADP" column that collides on the name
+"Rank" once a header's embedded newline is stripped - a real gotcha caught before it silently pulled the
+wrong column. `load_norris` reuses `load_docx_rankings` directly (identical format to Smyth/Winks). All three
+added to `SOURCE_WEIGHTS` at 1.0 (matching Dataroma/Barrett/Hansen/Smyth/Winks) and wired into
+`build_composite_board`'s QB/RB/WR/TE composite (bringing every skill-position player's `n_sources` to 10).
+
+**User separately noted all these sources also carry K/DST and asked to aggregate those too, with filter
+buttons.** This project's own model has never projected kickers or defenses (out of scope from the start -
+see the Data Sources section) - checked which of the 9 external sources actually cover K/DST before building
+anything: Dataroma/Barrett/Hansen/CSI don't (confirmed by inspecting each export's own position list); Bell/
+Bloom have full coverage (32/32 K, 32/32 DST each); Winks has partial (18 K/24 DST); Norris has 1 each
+(negligible but real, since his own list runs to ~300 overall and happens to include exactly one K/DST at the
+tail). Built `build_kdst_consensus_board` (consensus.py, new) as a SEPARATE function from Bell/Bloom/Winks/
+Norris only - not anchored to our board's player set the way the main composite is (there's no board to
+anchor to), instead a union of every K/DST player ANY of the 4 sources ranks.
+
+**Two real data-quality bugs found and fixed before trusting the K/DST merge, not shipped broken:**
+1. DST identity varies by source format ("Miami Dolphins" from Bell/Bloom vs. bare "MIA" from Winks/Norris) -
+   canonicalized to TEAM CODE instead of name text, reusing `data.TEAM_CODE_FIXES` plus a locally-added
+   `"JAC": "JAX"` fix (Jacksonville is coded differently across these specific exports - not covered by the
+   existing project-wide map, which normalizes a different, unrelated set of sources). Verified this actually
+   fixed real duplicates (Jacksonville/Rams DST rows collapsed from 2 rows each to 1, `n_sources` 2->4).
+2. A genuine mojibake byte in Bell's own export ("Eddy Piñeiro" -> "Eddy Pi�eiro") was scattering the same
+   real kicker across 2 unmatched rows even after accent-stripping fixed the JOIN (`_strip_accents`, via
+   `unicodedata` - confirmed real: entity-key dedup succeeded, `n_sources` correctly showed 4, only the
+   DISPLAY name was broken). Fixed by preferring a source's clean spelling over a mojibake one when building
+   the master player list (a stable sort on a `_mojibake` flag before `drop_duplicates`), rather than always
+   trusting whichever source happens to load first.
+
+Output: `output/draft_rankings/composite_board_kdst_{season}_{scoring}.csv` (66 rows: 34 K, 32 DST) - wired
+into `board_data.json` via a new `build_kdst_rows` helper in `build_board_artifact_data.py` that gives every
+MODEL_COLS field (ppg_pred, games_est, vbd, sim_*, etc.) an explicit null, since K/DST rows share the exact
+same JSON row shape the artifact's JS already expects rather than needing special-case handling there.
+
+**Artifact changes**: added K/DST theme colors (`--k`/`--dst` CSS vars, light+dark) and two new filter chips
+next to QB/RB/WR/TE. Since "Our Board" view is entirely empty dashes for K/DST (no model prediction exists),
+clicking K or DST from that view auto-switches to Consensus (the only view with real data for them) rather
+than showing a useless all-dash table - doesn't fire the other direction, only steers away from a view that
+would show nothing.
+
+**Separately shipped, same session: the long-open "reorganize columns so 2025 PPG doesn't blend into 2026-
+projected ones" TODO** (flagged 2026-09-01, deferred pending the user's specific layout preference - see the
+now-resolved `artifact_column_cleanup_todo` memory). User picked "reorder + vertical divider" from 3 mocked
+options. `2025 PPG` was already positioned right after Player/Team/New? from a prior session; added a
+`divider: true` flag on the first projected/consensus column in each view's `COLUMNS` config (`games_est` for
+Our Board, `consensus_overall_rank` for Consensus), rendered as a `.col-divider` left-rule class on both the
+header `<th>` and every body `<td>` in that column (so the rule runs unbroken down the table, not just across
+the header row). Also added a small "actual" sub-label under the `2025 PPG` header (a `note` field rendered
+via `<br><span class="col-note">`) to make the real-vs-projected split explicit rather than only implied by
+position.
+
+**User then asked to default the page to Consensus view instead of Our Board** - `state.view`/`state.sortKey`/
+`state.sortDir` defaults swapped to match `VIEWS.consensus`, and the HTML markup's own hardcoded `active`
+class on the view-toggle buttons moved from "Our Board" to "Consensus" so the two don't drift apart on first
+paint (a real, easy-to-miss class of bug if only the JS state were changed).
+
+**User caught a real wording issue after this shipped**: the subtitle said "Consensus-ranked (9 sources)" -
+technically referring to the 9 EXTERNAL sources, but reading as if this board's own model weren't part of the
+blend at all. Fixed `VIEWS.consensus.label` to "(10 sources)" and reworded the footer to lead with "10
+sources... this board's own model plus 9 trusted external sources" rather than "9 trusted external sources"
+first - both now correctly frame the model as one of the 10, not separate from them.
+
+**A real, transient publish issue hit twice this session, diagnosed rather than assumed-broken**: two
+consecutive republishes of the live Artifact rendered completely blank in the real browser for 15-25+
+seconds (one even triggered a CDP screenshot timeout, "renderer frozen"). Verified the HTML/JS itself was NOT
+the cause before concluding anything: served the exact same file from a local `python -m http.server` and it
+rendered instantly and worked perfectly (K/DST filters, divider, Consensus default, accent-fixed kicker name,
+all correct) - then published a brand-new, differently-ID'd artifact with the identical content and it ALSO
+initially rendered blank, then came up fine after ~15s. Confirmed via `read_network_requests` that the
+platform's own telemetry/tracking endpoints were returning 503 during this window. Conclusion: a real,
+transient platform-side delay, not a code bug - waiting longer resolved every case. Worth remembering: don't
+assume a blank/frozen Artifact render means the published HTML is broken - verify locally first (a plain
+static file server sidesteps the platform's own frame-runtime wrapper entirely) before spending time
+debugging code that already tested clean.
+
+Added `openpyxl` as a new dependency (Bell/Bloom's `.xlsx` exports) - `uv add openpyxl`, no other packages
+needed. Regenerated both composite boards, both K/DST boards, and `board_data.json`; republished the same
+Artifact URL (`a675377a-...`) three times this session (10-sources+K/DST, default-view swap, source-count
+wording fix) - all three verified live in a real browser before considering the round done. Also created one
+extra, unintentionally-duplicate Artifact (`0cdf3e5d-...`, from a diagnostic "is it just this one that's
+broken" test) - not used, no action taken on it (no delete capability in the tool), the main URL is still the
+one with the durable link.
+

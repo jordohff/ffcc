@@ -23,6 +23,33 @@ Sources, as described by the user:
   Word table) - parsed via the same zipfile+XML approach as coachspeak.py,
   not a new dependency. Same weight as Dataroma/Barrett/Hansen (see
   SOURCE_WEIGHTS), per the user's explicit instruction.
+- Jeff Bell and Sigmund Bloom (added 2026-09-02): overall + position rank,
+  PPR only (no half-PPR export provided - reused for both scoring formats,
+  same fallback precedent as Dataroma). Delivered as .xlsx, an identical
+  format between the two - a "Rank" column that's either a real overall-
+  rank integer or a "Tier N" label row (no player of its own - a tier
+  break, not a rank), a "Player" column combining name+team ("Ja'Marr
+  Chase CIN"), and a "Pos" column combining position+position-rank
+  ("WR1", "PK28", "TD32" - this source's own "PK"/"TD" labels, remapped
+  to "K"/"DST" here). Both cover the FULL player pool including K/DST
+  (32 kickers, 32 team defenses each) - the primary source for this
+  project's new K/DST consensus (see build_kdst_consensus_board).
+- Josh Norris (added 2026-09-02): same 4-column docx format as Smyth/
+  Winks (via load_docx_rankings), both half-PPR and full-PPR exports.
+  Ranks ~300 overall, which happens to include exactly 1 K and 1 DST at
+  the tail - a negligible but real K/DST contribution on top of Bell/
+  Bloom/Winks.
+
+K/DST: this project's own model doesn't project kickers or defenses at
+all (out of scope from the start - see CLAUDE.md's Data Sources section),
+so there's no board to anchor a K/DST composite to the way
+build_composite_board anchors QB/RB/WR/TE to our own model's player set.
+Built as a SEPARATE function, build_kdst_consensus_board, from whichever
+sources actually rank K/DST (Bell/Bloom full coverage, Winks partial,
+Norris negligible - Dataroma/Barrett/Hansen/CSI don't cover K/DST at
+all, confirmed by inspecting each export's own position list) - a union
+of every K/DST player ANY of those sources ranks, not anchored to one
+source's list.
 
 Design choices, and why:
 - WEIGHTED across sources (see SOURCE_WEIGHTS) - started equal-weight
@@ -55,12 +82,33 @@ Design choices, and why:
 import difflib
 import re
 import subprocess
+import unicodedata
 import zipfile
 import xml.etree.ElementTree as ET
 
 import pandas as pd
 
+from .data import TEAM_CODE_FIXES
 from .paid_data import _normalize_name
+
+# Jacksonville is coded "JAC" by some of these sources (Bell/Bloom, Winks)
+# and "JAX" by others (Norris) - not covered by data.TEAM_CODE_FIXES (that
+# map normalizes nflreadpy's OWN team-code inconsistencies, a different,
+# unrelated set of sources). Extended locally rather than touching the
+# shared project-wide map for a quirk specific to these consensus exports.
+_KDST_TEAM_FIXES = {**TEAM_CODE_FIXES, "JAC": "JAX"}
+
+
+def _strip_accents(s: str) -> str:
+    """"Piñeiro" -> "Pineiro" - some sources drop/mangle the accent
+    (confirmed: Bell/Bloom's export shows it as a mojibake "�", Winks/Norris
+    show it as a clean "Pineiro") while others keep it, which otherwise
+    scatters the same real kicker across 2 unmatched K/DST consensus rows.
+    Not applied to _normalize_name globally (used throughout this project
+    for QB/RB/WR/TE matching, where this hasn't been observed as a problem)
+    - scoped to the K/DST consensus path where it was actually found.
+    """
+    return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
 
 _W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
@@ -226,6 +274,87 @@ def load_winks(path: str) -> pd.DataFrame:
     return load_docx_rankings(path, "winks")
 
 
+_TIERED_POS_RE = re.compile(r"^([A-Za-z]+?)(\d+)$")
+_KDST_POSITION_MAP = {"PK": "K", "TD": "DST"}
+
+
+def _split_trailing_team(raw_player: str) -> tuple[str, str]:
+    """"Ja'Marr Chase CIN" -> ("Ja'Marr Chase", "CIN") - team is always the
+    last whitespace-separated token in the Bell/Bloom export (verified: even
+    a name with a real suffix, e.g. "Stetson Bennett IV LAR", keeps the
+    suffix as part of the name since "IV" isn't a team code - the true team
+    code is still the very last token).
+    """
+    parts = raw_player.rsplit(" ", 1)
+    if len(parts) == 2:
+        return parts[0].strip(), parts[1].strip()
+    return raw_player.strip(), ""
+
+
+def load_tiered_xlsx_rankings(path: str, prefix: str) -> pd.DataFrame:
+    """Parse Jeff Bell's / Sigmund Bloom's ranking export (added 2026-09-02,
+    identical structure between the two, verified before writing one shared
+    loader): column 0 ("Rank") is EITHER a real overall-rank integer or a
+    "Tier N" label row (no player/position of its own - a tier break, not a
+    player) - deliberately read positionally (raw.iloc[:, 0]), not via
+    raw["Rank"], since the file ALSO has a second, differently-purposed
+    "Rank\\nvs ADP" column that collides on the name "Rank" once a header's
+    embedded newline is stripped. "Player" combines name+team
+    ("Ja'Marr Chase CIN" - see _split_trailing_team); "Pos" combines
+    position+position-rank ("WR1", "PK28", "TD32" - this source's own
+    "PK"/"TD" kicker/defense labels, remapped to this project's "K"/"DST").
+    Real overall rank runs through the WHOLE player pool, K/DST included
+    (confirmed: e.g. rank 444-458 covers the export's last several K/DST/
+    backup-QB rows) - usable directly as an overall_rank, same as
+    Dataroma's.
+    """
+    raw = pd.read_excel(path)
+    rows = []
+    tier = 0
+    for _, row in raw.iterrows():
+        rank_val = row.iloc[0]
+        player, pos = row["Player"], row["Pos"]
+        if pd.isna(player) or pd.isna(pos):
+            if isinstance(rank_val, str) and rank_val.strip().lower().startswith("tier"):
+                tier += 1
+            continue
+        name, team = _split_trailing_team(str(player))
+        m = _TIERED_POS_RE.match(str(pos).strip())
+        if not m:
+            continue
+        pos_label = _KDST_POSITION_MAP.get(m.group(1), m.group(1))
+        rows.append({
+            "raw_name": name, "team": team, "position": pos_label,
+            f"{prefix}_overall_rank": int(rank_val), f"{prefix}_position_rank": int(m.group(2)),
+            f"{prefix}_tier": tier,
+        })
+    df = pd.DataFrame(rows)
+    df["normalized_name"] = df["raw_name"].map(_normalize_name)
+    return df
+
+
+def load_bell(path: str) -> pd.DataFrame:
+    """Jeff Bell's redraft rankings (added 2026-09-02, PPR only - reused for
+    both scoring formats, same fallback precedent as Dataroma). Same weight
+    as Dataroma/Barrett/Hansen/Smyth/Winks (see SOURCE_WEIGHTS)."""
+    return load_tiered_xlsx_rankings(path, "bell")
+
+
+def load_bloom(path: str) -> pd.DataFrame:
+    """Sigmund Bloom's redraft rankings (added 2026-09-02, PPR only - reused
+    for both scoring formats, same fallback precedent as Dataroma). Same
+    weight as Dataroma/Barrett/Hansen/Smyth/Winks (see SOURCE_WEIGHTS)."""
+    return load_tiered_xlsx_rankings(path, "bloom")
+
+
+def load_norris(path: str) -> pd.DataFrame:
+    """Josh Norris's redraft rankings (added 2026-09-02) - same 4-column
+    Rank/Player/Position/Team docx format as Smyth/Winks, reuses
+    load_docx_rankings directly. Same weight as those (see SOURCE_WEIGHTS).
+    """
+    return load_docx_rankings(path, "norris")
+
+
 def load_dataroma(path: str) -> pd.DataFrame:
     """Dataroma's PPR redraft rankings. Uses Rank (overall), Tier, Player,
     Position, and "Pos Rank" (e.g. "RB1" - position letters glued to the
@@ -383,9 +512,12 @@ def match_to_board(source: pd.DataFrame, crosswalk: pd.DataFrame, source_label: 
 # concrete examples. Weighting our own model down keeps the Consensus view
 # an actual outside check rather than implicitly being mostly "us".
 # Joel Smyth and Hayden Winks added 2026-09-01, same weight as Dataroma/
-# Barrett/Hansen per the user's explicit instruction.
+# Barrett/Hansen per the user's explicit instruction. Jeff Bell, Sigmund
+# Bloom, and Josh Norris added 2026-09-02 - same weight again, bringing the
+# total to 10 sources (our model + 9 external), per the user's explicit
+# "get to 10" ask.
 SOURCE_WEIGHTS = {"our": 0.25, "dataroma": 1.0, "barrett": 1.0, "hansen": 1.0, "csi": 0.5,
-                  "smyth": 1.0, "winks": 1.0}
+                  "smyth": 1.0, "winks": 1.0, "bell": 1.0, "bloom": 1.0, "norris": 1.0}
 
 
 def weighted_mean(df: pd.DataFrame, cols: list[str], weights: list[float]) -> pd.Series:
@@ -406,10 +538,16 @@ def weighted_mean(df: pd.DataFrame, cols: list[str], weights: list[float]) -> pd
 def build_composite_board(
     board: pd.DataFrame, dataroma: pd.DataFrame, barrett: pd.DataFrame, hansen: pd.DataFrame,
     csi: pd.DataFrame, smyth: pd.DataFrame, winks: pd.DataFrame,
+    bell: pd.DataFrame, bloom: pd.DataFrame, norris: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Blend our own board with the 6 external sources - see module
+    """Blend our own board with the 9 external sources - see module
     docstring for the full methodology and the two-composite-number design.
     Weighted per SOURCE_WEIGHTS, not a plain average - see that constant.
+    QB/RB/WR/TE only (this is anchored to OUR board's player set, which
+    doesn't cover K/DST at all) - Bell/Bloom/Norris's own K/DST rows simply
+    fail to match anything in the crosswalk and fall out via match_to_board's
+    existing dropna, same as any other unmatched row; see
+    build_kdst_consensus_board for the separate K/DST treatment.
     """
     crosswalk = build_board_crosswalk(board)
 
@@ -425,6 +563,9 @@ def build_composite_board(
     csi = add_position_pct(csi, "csi_position_rank", "csi_position_pct")
     smyth = add_position_pct(smyth, "smyth_position_rank", "smyth_position_pct")
     winks = add_position_pct(winks, "winks_position_rank", "winks_position_pct")
+    bell = add_position_pct(bell, "bell_position_rank", "bell_position_pct")
+    bloom = add_position_pct(bloom, "bloom_position_rank", "bloom_position_pct")
+    norris = add_position_pct(norris, "norris_position_rank", "norris_position_pct")
 
     matched = {
         "dataroma": (match_to_board(dataroma, crosswalk, "Dataroma"),
@@ -439,22 +580,87 @@ def build_composite_board(
                   ["join_key", "smyth_overall_rank", "smyth_position_rank", "smyth_position_pct"]),
         "winks": (match_to_board(winks, crosswalk, "Winks"),
                   ["join_key", "winks_overall_rank", "winks_position_rank", "winks_position_pct"]),
+        "bell": (match_to_board(bell, crosswalk, "Bell"),
+                 ["join_key", "bell_overall_rank", "bell_position_rank", "bell_position_pct"]),
+        "bloom": (match_to_board(bloom, crosswalk, "Bloom"),
+                  ["join_key", "bloom_overall_rank", "bloom_position_rank", "bloom_position_pct"]),
+        "norris": (match_to_board(norris, crosswalk, "Norris"),
+                   ["join_key", "norris_overall_rank", "norris_position_rank", "norris_position_pct"]),
     }
     for _, (df, cols) in matched.items():
         out = out.merge(df[cols], on="join_key", how="left")
     out = out.drop(columns=["join_key", "normalized_name"])
 
     pct_cols = ["our_position_pct", "dataroma_position_pct", "barrett_position_pct", "hansen_position_pct",
-                "csi_position_pct", "smyth_position_pct", "winks_position_pct"]
-    pct_weights = [SOURCE_WEIGHTS["our"], SOURCE_WEIGHTS["dataroma"], SOURCE_WEIGHTS["barrett"],
-                   SOURCE_WEIGHTS["hansen"], SOURCE_WEIGHTS["csi"], SOURCE_WEIGHTS["smyth"], SOURCE_WEIGHTS["winks"]]
+                "csi_position_pct", "smyth_position_pct", "winks_position_pct", "bell_position_pct",
+                "bloom_position_pct", "norris_position_pct"]
+    pct_weights = [SOURCE_WEIGHTS[n] for n in
+                   ["our", "dataroma", "barrett", "hansen", "csi", "smyth", "winks", "bell", "bloom", "norris"]]
     out["consensus_position_pct"] = weighted_mean(out, pct_cols, pct_weights)
     out["n_sources"] = out[pct_cols].notna().sum(axis=1)
 
     overall_cols = ["our_overall_rank", "dataroma_overall_rank", "barrett_overall_rank", "hansen_overall_rank",
-                    "smyth_overall_rank", "winks_overall_rank"]
-    overall_weights = [SOURCE_WEIGHTS["our"], SOURCE_WEIGHTS["dataroma"], SOURCE_WEIGHTS["barrett"],
-                        SOURCE_WEIGHTS["hansen"], SOURCE_WEIGHTS["smyth"], SOURCE_WEIGHTS["winks"]]
+                    "smyth_overall_rank", "winks_overall_rank", "bell_overall_rank", "bloom_overall_rank",
+                    "norris_overall_rank"]
+    overall_weights = [SOURCE_WEIGHTS[n] for n in
+                        ["our", "dataroma", "barrett", "hansen", "smyth", "winks", "bell", "bloom", "norris"]]
     out["consensus_overall_rank"] = weighted_mean(out, overall_cols, overall_weights)
 
     return out.sort_values("consensus_overall_rank", na_position="last").reset_index(drop=True)
+
+
+def build_kdst_consensus_board(bell: pd.DataFrame, bloom: pd.DataFrame, winks: pd.DataFrame, norris: pd.DataFrame) -> pd.DataFrame:
+    """Standalone K/DST consensus board - our own model doesn't project
+    kickers or defenses at all, so there's no board to anchor to the way
+    build_composite_board anchors QB/RB/WR/TE to our own model's player set
+    (see module docstring). Built instead as a union of every K/DST player
+    ANY of these 4 sources ranks (Bell/Bloom: full 32/32 K/DST coverage
+    each; Winks: partial, 18 K/24 DST; Norris: 1 each, negligible but real)
+    - not anchored to one source's own list, since there's no reason to
+    drop a kicker Bloom ranks just because Bell doesn't happen to.
+
+    DST identity is canonicalized by TEAM CODE, not raw name - sources
+    disagree on how they write a defense's name (Bell/Bloom: "Miami
+    Dolphins"; Winks/Norris: "MIA"), which would otherwise scatter the same
+    real defense across multiple unmatched rows. Kicker identity still uses
+    normalized player name (no such format disagreement observed for K).
+    """
+    sources = {"bell": bell, "bloom": bloom, "winks": winks, "norris": norris}
+    kdst: dict[str, pd.DataFrame] = {}
+    for name, df in sources.items():
+        d = df[df["position"].isin(["K", "DST"])].copy()
+        d["team"] = d["team"].str.upper().replace(_KDST_TEAM_FIXES)
+        d["entity_key"] = d["normalized_name"].map(_strip_accents)
+        dst_mask = d["position"] == "DST"
+        d.loc[dst_mask, "entity_key"] = "dst_" + d.loc[dst_mask, "team"]
+        d = add_position_pct(d, f"{name}_position_rank", f"{name}_position_pct")
+        kdst[name] = d
+
+    master = pd.concat([d[["entity_key", "raw_name", "position", "team"]] for d in kdst.values()], ignore_index=True)
+    # Bell's xlsx export has a real mojibake byte in at least one name (Eddy
+    # Piñeiro -> "Eddy Pi�eiro") - a genuine source-data corruption, not
+    # a normalization bug (confirmed: _strip_accents already correctly
+    # dedupes this player onto one entity_key; only the DISPLAY name is
+    # broken). Prefer a source's clean spelling when one exists, rather than
+    # always keeping the first (Bell-priority) row - a stable sort so every
+    # other player's normal Bell-first preference is unaffected.
+    master["_mojibake"] = master["raw_name"].str.contains("�", na=False)
+    master = master.sort_values("_mojibake", kind="stable").drop_duplicates(subset="entity_key", keep="first")
+    master = master.drop(columns="_mojibake").reset_index(drop=True)
+
+    out = master.copy()
+    for name, d in kdst.items():
+        cols = ["entity_key", f"{name}_overall_rank", f"{name}_position_rank", f"{name}_position_pct"]
+        out = out.merge(d[cols], on="entity_key", how="left")
+
+    pct_cols = [f"{n}_position_pct" for n in kdst]
+    pct_weights = [SOURCE_WEIGHTS[n] for n in kdst]
+    out["consensus_position_pct"] = weighted_mean(out, pct_cols, pct_weights)
+    out["n_sources"] = out[pct_cols].notna().sum(axis=1)
+
+    overall_cols = [f"{n}_overall_rank" for n in kdst]
+    overall_weights = [SOURCE_WEIGHTS[n] for n in kdst]
+    out["consensus_overall_rank"] = weighted_mean(out, overall_cols, overall_weights)
+
+    out["player_display_name"] = out["raw_name"]
+    return out.drop(columns=["entity_key"]).sort_values("consensus_position_pct", na_position="last").reset_index(drop=True)
