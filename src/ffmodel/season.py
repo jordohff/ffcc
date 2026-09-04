@@ -2264,6 +2264,74 @@ def simulate_season_outcomes(
     )
 
 
+RB_TEAMMATE_COUPLING_SLOPE = -0.0751
+"""Real, walk-forward-validated (2018-2025) same-team RB opportunity-sharing
+effect: `ppg_resid ~ slope * (sum of same-team RB teammates' games_resid)`,
+fit via OLS on this project's own real walk-forward residuals. Confirmed
+real and reproducible - significant in BOTH a calibration (2018-2021,
+p=0.040) and validation (2022-2025, p=0.00011) half, and the effect didn't
+fade out of sample (it got stronger: slope -0.051 -> -0.096). Direction
+matches real football logic: when a teammate plays MORE games than the
+model expected (positive games_resid for them), MY own rate comes in LOWER
+than expected, and vice versa when a teammate misses unexpected time -
+touches/targets are a shared, roughly zero-sum pool within a backfield.
+
+NOT shipped as a point-estimate correction, deliberately - the exact
+MAGNITUDE doesn't transfer precisely: applying the calibration-period slope
+to the validation period did not reduce ppg_resid MAE (2.4645 -> 2.4667,
+flat/slightly worse), meaning the effect is real in sign but too noisy in
+size to sharpen any single player's point estimate. Used ONLY here, in the
+roster-level Monte Carlo simulation, where the goal is a more REALISTIC
+JOINT distribution across a roster's own same-team RBs (do their outcomes
+correctly show real anti-correlation, not treated as independent) rather
+than a sharper individual prediction - a genuinely different bar than point
+accuracy, and one this real, reproducible-in-direction effect does clear.
+Uses the full 2018-2025 pooled fit (not shrunk further) since this isn't
+promising point-estimate precision. Checked RB/WR/TE for this same pattern
+before choosing RB: WR showed a much weaker effect (r=-0.025 vs RB's -0.08)
+and TE showed no real signal (p=0.19) - RB only, matching where the real,
+validated signal actually is. See CLAUDE.md 2026-09-04 for the full test.
+"""
+
+
+def _apply_rb_teammate_coupling(roster_board: pd.DataFrame, total_draws: np.ndarray, games_draws: np.ndarray) -> np.ndarray:
+    """Couples same-team RB teammates' simulated draws (see
+    RB_TEAMMATE_COUPLING_SLOPE) - within EACH simulated universe, a
+    teammate's own games_resid draw (how far above/below their games_est
+    they played in that universe) shifts a player's simulated ppg in the
+    opposite direction, before re-multiplying by that player's own
+    (unchanged) games draw. Only touches RB rows that have a real RB
+    teammate elsewhere in `roster_board` (same `team`) - every other row,
+    including RBs with no roster teammate, passes through unchanged.
+    """
+    if "team" not in roster_board.columns:
+        return total_draws
+    positions = roster_board["position"].to_numpy()
+    teams = roster_board["team"].to_numpy()
+    games_est = roster_board["games_est"].to_numpy()
+    rb_mask = positions == "RB"
+    if rb_mask.sum() < 2:
+        return total_draws
+
+    adjusted = total_draws.copy()
+    games_resid = games_draws - games_est[:, None]
+    for team in pd.unique(teams[rb_mask]):
+        if pd.isna(team):
+            continue
+        idxs = np.where(rb_mask & (teams == team))[0]
+        if len(idxs) < 2:
+            continue
+        team_games_resid_sum = games_resid[idxs].sum(axis=0)
+        for i in idxs:
+            teammate_resid_sum = team_games_resid_sum - games_resid[i]
+            ppg_draws_i = np.divide(
+                adjusted[i], games_draws[i], out=np.zeros_like(adjusted[i]), where=games_draws[i] > 0
+            )
+            adjusted_ppg_i = np.clip(ppg_draws_i + RB_TEAMMATE_COUPLING_SLOPE * teammate_resid_sum, 0, None)
+            adjusted[i] = adjusted_ppg_i * games_draws[i]
+    return adjusted
+
+
 def simulate_roster_outcomes(
     roster_board: pd.DataFrame,
     vet_residuals: pd.DataFrame,
@@ -2284,19 +2352,23 @@ def simulate_roster_outcomes(
     total season output vary," not just "how does each player individually
     vary."
 
-    Deliberately does NOT model cross-player correlation (a bad QB week
-    dragging his own receivers down together, an injury dynamically opening
-    up a teammate's workload - the vacated_opportunity signal this pipeline
-    already computes historically, but not simulated dynamically here) -
-    that's phase 3, scoped but not built (see CLAUDE.md). Treating each
-    roster player's simulated outcome as independent likely UNDERSTATES the
-    roster's true variance somewhat, since within-team correlations in the
-    real NFL trend positive far more often than negative - read this as a
-    reasonable FLOOR on team-level uncertainty, not the final word.
+    Models ONE piece of real cross-player correlation (2026-09-04, phase 3 -
+    scoped in CLAUDE.md): same-team RB teammates' outcomes are coupled via
+    RB_TEAMMATE_COUPLING_SLOPE, so owning two RBs from the same real NFL
+    backfield in this roster now correctly shows some real anti-correlation
+    (one's bad-health draw partially offsetting into the other's opportunity
+    gain) rather than being treated as fully independent. A QB dragging his
+    own pass-catchers down/up together was tested too and found real but too
+    weak (Pearson r=0.067, not significant) to build - not modeled. Every
+    other cross-player relationship (a non-RB injury opening a teammate's
+    workload, etc.) is still treated as independent - this remains a
+    reasonable FLOOR on team-level uncertainty outside the RB case, not the
+    final word on every possible correlation.
 
     `roster_board` is the subset of the full board for exactly the drafted
-    roster (needs player_display_name/position/ppg_pred/games_est/
-    is_rookie, same as simulate_season_outcomes).
+    roster (needs player_display_name/position/team/ppg_pred/games_est/
+    is_rookie, same as simulate_season_outcomes plus `team` for the RB
+    coupling above).
 
     Returns a dict:
     - `team_totals`: the raw (n_sims,) array of simulated team season
@@ -2306,7 +2378,8 @@ def simulate_roster_outcomes(
       median/p90), so a user can see which roster spots are driving the
       team's own variance, not just the aggregate number.
     """
-    total_draws, _ = _draw_simulated_totals(roster_board, vet_residuals, rookie_residuals, n_sims, seed, max_games)
+    total_draws, games_draws = _draw_simulated_totals(roster_board, vet_residuals, rookie_residuals, n_sims, seed, max_games)
+    total_draws = _apply_rb_teammate_coupling(roster_board, total_draws, games_draws)
     team_totals = total_draws.sum(axis=0)
 
     player_detail = pd.DataFrame(

@@ -33,7 +33,7 @@ def main() -> None:
     parser.add_argument("--draft-season", type=int, default=2026)
     parser.add_argument("--players", nargs="+", default=[], help="Player names, space-separated (quote multi-word names)")
     parser.add_argument("--roster-file", type=str, default=None, help="Path to a text file, one player name per line")
-    parser.add_argument("--n-sims", type=int, default=2000)
+    parser.add_argument("--n-sims", type=int, default=10000)
     args = parser.parse_args()
 
     names = load_roster_names(args)

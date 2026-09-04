@@ -4897,3 +4897,53 @@ Standing reference for future sessions: if a similar "recovering star the market
 (high role + real recent injury), this test is the answer, already run and validated - don't re-litigate the
 market-gap intuition from scratch; the real, out-of-sample evidence says caution is warranted, not a boost.
 
+### 2026-09-04 (cont'd) - Monte Carlo phase 3 (partial): same-team RB teammate coupling shipped for the
+roster tool, QB-drags-pass-catchers tested and correctly left unbuilt
+
+User asked to pick up phase 3 of the Monte Carlo roadmap (correlated cross-player simulation - scoped since
+phase 1/2 shipped, deliberately deferred until then: "a bad QB week dragging his own receivers down together,
+dynamic vacated-opportunity on injury"). Tested both pieces against real walk-forward residuals before
+building anything, same discipline as every other feature this project has shipped.
+
+**QB-drags-pass-catchers: tested, real but too weak to build.** Correlation between a team's QB ppg_resid and
+that same team's WR/TE mean ppg_resid, same season, 2018-2025 (n=477 team-seasons): Spearman rho=0.119
+(p=0.009, real) but Pearson r=0.067 (p=0.147, NOT significant) - a real but small, marginal effect. Not built.
+
+**Same-team RB teammate coupling ("dynamic vacated opportunity"): real, validated in direction, shipped for
+the roster-simulation tool specifically.** Tested whether a player's own ppg_resid correlates with a
+TEAMMATE's games_resid (same team, same position, same season) - i.e. does one RB's unexpected absence show
+up as a real opportunity bump for the other RB on the roster, dynamically, not just as the already-existing
+static prior-season vacated_opportunity feature. Real, clearly significant negative correlation for RB
+(r=-0.080, p=0.00006, n=2,536 pairs) - much weaker for WR (r=-0.025, p=0.042) and not significant for TE
+(r=-0.032, p=0.186, real football sense - TE rooms rarely run a true committee). Scoped to RB only per user
+choice, matching where the real signal actually is.
+
+Fit the actual regression coefficient (not just the correlation) via OLS: `ppg_resid ~ slope * sum(teammates'
+games_resid)`, aggregating properly across teams with 3+ RBs (not just pairwise, which double-counts).
+Calibrate (2018-2021) slope=-0.051 (p=0.040), validate (2022-2025) slope=-0.096 (p=0.00011) - the effect held
+up and even GREW out of sample, a good sign it's real. **But the decisive practical test - applying the
+calibration-period slope to predict the validation period's ppg_resid - did NOT reduce MAE** (2.4645 ->
+2.4667, flat/slightly worse): the effect is real and reproducible in SIGN, but too noisy in exact MAGNITUDE
+to sharpen any single player's point estimate. This is the same shape of result that's killed several other
+corrections in this project (real correlation, unstable magnitude, no accuracy gain) - the difference this
+time is the INTENDED USE isn't a point-estimate correction at all.
+
+**Shipped `_apply_rb_teammate_coupling` in `simulate_roster_outcomes` only** (NOT `simulate_season_outcomes`,
+which simulates single players across the whole board, not roster construction) - `RB_TEAMMATE_COUPLING_SLOPE
+= -0.0751` (the full 2018-2025 pooled fit). Within each simulated universe, for same-team RB pairs/groups on
+the drafted roster, a teammate's own games_resid draw (how far above/below their games_est they landed in
+THAT universe) shifts a player's simulated ppg in the opposite direction before re-multiplying by that
+player's own unchanged games draw - means stay essentially unbiased (the adjustment averages to ~0 across
+many draws), only the JOINT/correlation structure changes. Verified directly on a real committee backfield
+(Jadarian Price/Zach Charbonnet, SEA): raw correlation between their simulated season totals went from
++0.004 (independent, as before) to **-0.076 after coupling** - matching the real, empirically-measured
+relationship almost exactly. Confirmed non-RB players (a QB in the same test roster) and RBs with no roster
+teammate are completely unaffected. Also bumped `scripts/simulate_roster.py`'s own `--n-sims` CLI default
+from 2000 to 10000, matching the board-wide simulation's default bumped earlier this session.
+
+Net: phase 3 is now partially built - the one piece (RB opportunity-sharing) that cleared real, validated
+evidence shipped for the roster tool specifically (where joint realism is the actual goal, not point
+accuracy); the other piece (QB-drags-catchers) was tested honestly and correctly left unbuilt given how weak
+the real signal turned out to be. `simulate_season_outcomes` (phase 1, single-player board view) is
+unaffected either way - this is scoped to roster-level simulation only, matching what was asked.
+
