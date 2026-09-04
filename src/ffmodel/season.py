@@ -2224,13 +2224,15 @@ def simulate_season_outcomes(
     p90 of total points) plus two derived, decision-relevant probabilities:
     - sim_bust_prob: P(simulated total < this position's replacement level)
       - "how often does this pick fail to outscore what's on the wire."
-    - sim_boom_prob: P(simulated total >= this position's own current top-5
+    - sim_boom_prob: P(simulated total >= this position's own current top-10
       average total_points_pred) - a dynamic, self-consistent "elite tier"
       bar (recomputed from the board itself each run, not a hardcoded
-      number), answering "how often does this pick have a top-5-at-position
+      number), answering "how often does this pick have a top-10-at-position
       caliber season" - directly useful for the "draft for upside" framing
       this project has repeatedly validated over discounting for volatility
-      (see the rejected risk-adjusted-VBD research).
+      (see the rejected risk-adjusted-VBD research). Widened from top-5 to
+      top-10 (2026-09-04, user request) - top-5 made "boom" too rare a bar
+      to be a useful decision signal outside true elite-tier players.
     - sim_full_season_prob: P(simulated games_played >= 16) - "how often
       does this player actually play a (near-)full season," added
       2026-08-28 in direct response to a challenge that games_est (a mean)
@@ -2243,7 +2245,7 @@ def simulate_season_outcomes(
     """
     total_draws, games_draws = _draw_simulated_totals(board, vet_residuals, rookie_residuals, n_sims, seed, max_games)
     replacement_by_pos = board.groupby("position")["replacement_points"].first()
-    boom_by_pos = board.groupby("position")["total_points_pred"].apply(lambda s: s.nlargest(5).mean())
+    boom_by_pos = board.groupby("position")["total_points_pred"].apply(lambda s: s.nlargest(10).mean())
     replacement_pts = board["position"].map(replacement_by_pos).fillna(0.0).to_numpy()[:, None]
     boom_pts = board["position"].map(boom_by_pos).fillna(np.inf).to_numpy()[:, None]
 

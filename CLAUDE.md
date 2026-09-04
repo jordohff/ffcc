@@ -4783,3 +4783,54 @@ from this session - the rookie-curve extension and this fix were pursued as two 
 investigations (different populations, different data sources, different validation), not bundled together
 just because they were requested in the same breath.
 
+### 2026-09-04 (cont'd) - Monte Carlo to 10k sims, a real box plot in the Artifact, boom widened to top-10 -
+and a real, live-published data-corruption bug found and fixed
+
+User asked to (1) run more Monte Carlo, (2) get an explanation of what boom/bust mean, and (3) replace the
+Artifact's single-point sim indicator with a real box plot. `sim_p25`/`sim_p75` were already computed by
+`simulate_season_outcomes` but never exposed past the CSV - added to `MODEL_COLS`/`KDST_MODEL_COL_DEFAULTS`
+in `build_board_artifact_data.py`. `n_sims` default bumped 2000 -> 10000 in both `simulate_season_outcomes`
+and `simulate_roster_outcomes` (full pipeline run time went ~1min -> ~2min, still fine). Artifact's detail
+panel rewritten from a single dot-on-a-line to a real box-and-whisker plot (two whisker segments p10-p25/
+p75-p90, a filled IQR box p25-p75, a median tick) - verified pixel-correct in a real browser.
+
+Boom/bust definitions, as implemented (`simulate_season_outcomes`): **bust_prob** = P(simulated total <
+that position's own replacement level) - "how often does this pick fail to outscore the wire." **boom_prob**
+= P(simulated total >= that position's own current top-N average total_points_pred), a bar recomputed from
+the board itself each run (not hardcoded). Widened N from 5 to 10 per user request - top-5 made "boom" too
+rare a bar to be a useful decision signal outside true elite-tier players; top-10 gives real players (not
+just the top handful) a differentiated, meaningful probability (spot-checked: Bijan Robinson went from a
+rarer top-5 bar to 60%+ boom probability under top-10, a genuinely more useful number).
+
+**Separately, a real, serious bug was found and fixed - it had already been published live.** The Artifact's
+data-splice step (embedding the fresh `board_data.json` into `draft_board_source.html`) has always worked by
+running a small Python script that does `lines[N] = new_line` with N a hardcoded line number remembered from
+an earlier `grep -n` in the SAME session. This round, CSS and JS edits (for the box plot) were made to the
+file BEFORE the next splice, shifting every line number after them - the splice script still used the OLD
+line number, so it overwrote a line of real footer HTML (`Stored only in your own browser.<br>`) instead of
+the actual data-blob line, injecting the fresh JSON in the middle of the `<footer>` paragraph and leaving the
+ORIGINAL (stale) data blob orphaned later in the file with its own `</script>` still intact. Net effect: two
+`<script id="board-data">` tags in one document (invalid HTML), a truncated footer sentence, and - because
+`document.getElementById` silently uses the first match regardless, the jsdom test suite only exercises JS
+logic (never validates surrounding HTML), and a real-browser visual check happened to focus on the box plot
+rather than scrolling to read the footer character-by-character - **this was published live and went
+unnoticed for one full publish cycle.**
+
+Caught it by explicitly re-reading the live published artifact (`Artifact action:"read"`) and grep-counting
+`<script id="board-data"` in the saved output - found 2, not 1. Traced the exact damage with string search
+(not line numbers): the real footer text and the correctly-positioned original data blob were both still
+intact, just with one line destroyed and a stray copy injected earlier. Fixed properly with a Python script
+keyed entirely on the literal marker `<script id="board-data"` (never a line number) - found both
+occurrences via `.find()`, kept the real intervening footer content byte-for-byte (captured from the file
+itself, not retyped by hand - an initial hand-retyped reconstruction attempt was caught by an assertion
+mismatch before it could ship a SECOND, differently-wrong version), removed the misplaced blob, restored the
+truncated "browser.<br>" text, and replaced the correctly-positioned blob's JSON with fresh data. Verified
+by re-reading the republished artifact: exactly 1 occurrence of the marker, footer text reads correctly in
+full ("Stored only in your own browser."), file size back down from 1.7MB to the expected ~950KB (no more
+duplicate payload).
+
+Saved as a persistent memory (`artifact_data_splice_lesson.md`) - the fix going forward: never hardcode a
+line number for this splice; always re-derive the insertion point fresh from the unique string marker, assert
+exactly one occurrence before AND after, and separately grep-check a real content anchor near the boundary
+(not just run the JS test suite, which cannot catch this class of bug) before considering a publish verified.
+
