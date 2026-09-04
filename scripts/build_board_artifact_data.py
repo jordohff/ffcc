@@ -33,8 +33,8 @@ BOARD_DIR = Path(__file__).resolve().parents[1] / "output" / "draft_rankings"
 MODEL_COLS = [
     "player_id", "player_display_name", "position", "team", "ppg_pred", "prev_ppg", "games_est",
     "total_points_pred", "vbd", "depth_chart_rank", "is_rookie", "team_changed", "current_injury_status",
-    "sim_p10", "sim_median", "sim_p90", "sim_bust_prob", "sim_boom_prob", "sim_full_season_prob",
-    "manual_override_note",
+    "sim_p10", "sim_p25", "sim_median", "sim_p75", "sim_p90", "sim_bust_prob", "sim_boom_prob",
+    "sim_full_season_prob", "manual_override_note",
 ]
 # Trimmed 2026-09-01 (was one column per external source) at the user's
 # request - the Consensus view no longer shows a column per ranking, just
@@ -56,8 +56,8 @@ COMPOSITE_COLS = [
 KDST_MODEL_COL_DEFAULTS = {
     "ppg_pred": None, "prev_ppg": None, "games_est": None, "total_points_pred": None, "vbd": None,
     "depth_chart_rank": None, "is_rookie": 0, "team_changed": 0, "current_injury_status": None,
-    "sim_p10": None, "sim_median": None, "sim_p90": None, "sim_bust_prob": None, "sim_boom_prob": None,
-    "sim_full_season_prob": None, "manual_override_note": None,
+    "sim_p10": None, "sim_p25": None, "sim_median": None, "sim_p75": None, "sim_p90": None,
+    "sim_bust_prob": None, "sim_boom_prob": None, "sim_full_season_prob": None, "manual_override_note": None,
 }
 
 

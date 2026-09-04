@@ -2211,7 +2211,7 @@ def simulate_season_outcomes(
     board: pd.DataFrame,
     vet_residuals: pd.DataFrame,
     rookie_residuals: pd.DataFrame,
-    n_sims: int = 2000,
+    n_sims: int = 10000,
     seed: int = 42,
     max_games: int = 17,
 ) -> pd.DataFrame:
@@ -2266,7 +2266,7 @@ def simulate_roster_outcomes(
     roster_board: pd.DataFrame,
     vet_residuals: pd.DataFrame,
     rookie_residuals: pd.DataFrame,
-    n_sims: int = 2000,
+    n_sims: int = 10000,
     seed: int = 42,
     max_games: int = 17,
 ) -> dict:
