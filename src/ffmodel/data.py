@@ -8,6 +8,8 @@ inform past weeks in a backtest (nflreadpy's load_injuries is what's used
 for that instead - see add_injury_features in features.py).
 """
 
+import io
+
 import pandas as pd
 import requests
 
@@ -374,8 +376,6 @@ def load_market_ecr_history() -> pd.DataFrame:
     """
     resp = requests.get(MARKET_ECR_HISTORY_URL, timeout=60)
     resp.raise_for_status()
-    import io
-
     df = pd.read_parquet(io.BytesIO(resp.content), columns=["page_type", "player", "pos", "ecr", "scrape_date"])
     df = df[df["page_type"].isin(MARKET_ECR_PAGE_TYPES)].reset_index(drop=True)
     df["scrape_date"] = pd.to_datetime(df["scrape_date"])
