@@ -106,6 +106,32 @@ def build_one(scoring: str) -> list[dict]:
     return json.loads(merged.to_json(orient="records"))
 
 
+SKILL_POSITIONS = ["QB", "RB", "WR", "TE"]
+
+
+def build_replacement_constants(scoring: str) -> dict:
+    """Per-position (replacement_points, replacement_rank) so the artifact's
+    JS can recompute live VBD as players are drafted, instead of the static
+    pre-draft VBD baked into the CSV. `compute_vbd` (season.py) subtracts a
+    per-position constant baseline from total_points_pred to get vbd - that
+    constant is recoverable directly from any player's own row
+    (points - vbd), and its RANK (how many players sit at/above it) is the
+    "how many players deep does league-wide demand run" figure the live
+    recompute needs. Median (not mean/first) guards against float noise
+    across ~100-250 rows per position landing on a robust, real number.
+    """
+    board = pd.read_csv(BOARD_DIR / f"draft_rankings_2026_{scoring}.csv")
+    out = {}
+    for pos in SKILL_POSITIONS:
+        sub = board[(board["position"] == pos) & board["vbd"].notna() & board["total_points_pred"].notna()]
+        if sub.empty:
+            continue
+        points = float((sub["total_points_pred"] - sub["vbd"]).median())
+        rank = int((sub["total_points_pred"] >= points).sum())
+        out[pos] = {"points": round(points, 2), "rank": rank}
+    return out
+
+
 def main() -> None:
     # Displayed in the artifact's masthead - reflects when this SCRIPT was
     # last run, i.e. when the embedded data was actually last regenerated,
@@ -116,6 +142,10 @@ def main() -> None:
         "generated_at": generated_at,
         "half_ppr": build_one("half_ppr") + build_kdst_rows("half_ppr"),
         "ppr": build_one("ppr") + build_kdst_rows("ppr"),
+        "replacement": {
+            "half_ppr": build_replacement_constants("half_ppr"),
+            "ppr": build_replacement_constants("ppr"),
+        },
     }
     out_path = BOARD_DIR / "board_data.json"
     out_path.write_text(json.dumps(data), encoding="utf-8")
