@@ -347,3 +347,36 @@ def fetch_sleeper_players() -> pd.DataFrame:
     df = df.reset_index()
     df["gsis_id"] = df["gsis_id"].str.strip()
     return df
+
+
+# The dynastyprocess/data GitHub repo's own accumulated archive of daily
+# FantasyPros ECR scrapes since Dec 2019 (NOT "db_fpecr_latest.csv", which
+# is a same-day-only snapshot with no history) - used by
+# season.compute_preseason_market_rank to test/apply real historical
+# preseason consensus as a feature (2026-09-04 investigation, see CLAUDE.md).
+# Fetched directly from raw.githubusercontent.com, not via nflreadpy's own
+# downloader or the github.com/.../raw redirect - both of those hit
+# transient connection resets on this specific file in past sessions
+# (a known, recurring issue with this one host/file, not something
+# specific to this loader); the raw.githubusercontent.com host has been
+# reliable every time it's been tried.
+MARKET_ECR_HISTORY_URL = "https://raw.githubusercontent.com/dynastyprocess/data/master/files/db_fpecr.parquet"
+MARKET_ECR_PAGE_TYPES = {f"redraft-{pos.lower()}" for pos in FANTASY_POSITIONS}
+
+
+def load_market_ecr_history() -> pd.DataFrame:
+    """Real FantasyPros redraft ECR (expert consensus rank) scrapes,
+    2019-present, position rank only (not overall) - filtered to the
+    redraft-{qb,rb,wr,te} pages this project actually uses. `ecr` here IS
+    the position rank (fractional - FantasyPros itself averages several
+    sub-pages/experts per scrape), matching the treatment `fit_rookie_curve`
+    already gives draft pick (a real, market-set ordinal, log-transformed).
+    """
+    resp = requests.get(MARKET_ECR_HISTORY_URL, timeout=60)
+    resp.raise_for_status()
+    import io
+
+    df = pd.read_parquet(io.BytesIO(resp.content), columns=["page_type", "player", "pos", "ecr", "scrape_date"])
+    df = df[df["page_type"].isin(MARKET_ECR_PAGE_TYPES)].reset_index(drop=True)
+    df["scrape_date"] = pd.to_datetime(df["scrape_date"])
+    return df

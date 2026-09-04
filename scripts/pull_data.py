@@ -19,6 +19,7 @@ from ffmodel.data import (
     load_current_depth_chart,
     load_draft_pick_capital,
     load_injury_reports,
+    load_market_ecr_history,
     load_nextgen_receiving,
     load_participation,
     load_pbp_dropbacks,
@@ -82,7 +83,15 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
-    live_sources = {"sleeper_players.parquet", "current_depth_chart.parquet", "rosters.parquet", "injuries.parquet"}
+    live_sources = {
+        "sleeper_players.parquet", "current_depth_chart.parquet", "rosters.parquet", "injuries.parquet",
+        # The CURRENT season's own preseason ECR keeps accumulating new
+        # scrape dates through early September (see
+        # data.load_market_ecr_history) - a mid-season refresh should pick
+        # up the freshest available preseason read the same way it does
+        # for depth chart/rosters/injuries.
+        "market_ecr_history.parquet",
+    }
 
     def is_forced(filename: str) -> bool:
         return args.force or (args.refresh_live and filename in live_sources)
@@ -183,6 +192,12 @@ def main() -> None:
         f"team offensive play volume for seasons {args.seasons}",
         lambda: load_team_play_volume(args.seasons),
         args.force,
+    )
+    _pull_and_cache(
+        "market_ecr_history.parquet",
+        "historical FantasyPros redraft ECR (position rank) archive, 2019-present",
+        load_market_ecr_history,
+        is_forced("market_ecr_history.parquet"),
     )
 
 

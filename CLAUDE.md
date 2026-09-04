@@ -4537,3 +4537,99 @@ extra, unintentionally-duplicate Artifact (`0cdf3e5d-...`, from a diagnostic "is
 broken" test) - not used, no action taken on it (no delete capability in the tool), the main URL is still the
 one with the durable link.
 
+### 2026-09-04 - live VBD + position-scarcity banner in the Artifact; a real preseason-market-consensus
+feature shipped for RB/WR/TE (Brock Bowers investigation, reopened and closed)
+
+**Live VBD (Artifact-only, no model change).** User asked what else could improve the VBD model; separately
+noted they've been drafting off the Consensus view because they don't fully trust our own VBD yet - a real,
+useful signal about where to invest next. Scoped two features together (user picked "both" over a
+clarifying question): a view-agnostic position-scarcity banner (compact pills under the title, e.g. "RB
+27/30", tracking how many startable players remain before replacement level at each position - useful no
+matter which ranking you're actually drafting from), and live VBD recompute on the Our Board view itself
+(replacement level shifts as players are checked off drafted, instead of staying frozen at the pre-draft
+snapshot).
+
+Required deriving per-position `replacement_points`/`replacement_rank` at artifact-build time
+(`build_replacement_constants` in `build_board_artifact_data.py` - recovered directly from any player's own
+row, `points - vbd`, then counting how many players sit at/above it) and embedding them in `board_data.json`
+under a new `replacement` key. **First implementation was mathematically clean but backwards in a way that
+would have been actively confusing, caught by a jsdom test before publish**: a "remaining demand" framing
+(reduce the replacement RANK by how many players are already drafted at that position) made VBD *shrink* for
+remaining players as bench-tier guys got drafted - the opposite of "a positional run makes what's left look
+scarcer." Fixed to a simpler, more intuitive definition: always take the Nth-best player among whoever's
+still undrafted, N held FIXED (not demand-adjusted) - this correctly raises remaining players' VBD when
+anyone AT-OR-ABOVE the current replacement line gets drafted (a real run), and correctly leaves it unchanged
+when a deep-bench player gets drafted (no real change in scarcity). Verified both mathematically (worked the
+index algebra by hand for small examples before trusting it) and in a real browser: drafting the top RB
+raised every other RB's live VBD exactly as designed. 23/23 jsdom tests, real-browser spot-check before each
+publish.
+
+Separately added a **read-only "2026 VBD" column to the Consensus view** (between 2025 PPG and Consensus, per
+the user's explicit placement ask) - a frozen snapshot of the pre-draft VBD (`r.vbd_static`, captured once at
+data-load time before the live-recompute logic ever runs), deliberately decoupled from Our Board's live
+value so the Consensus view's own external-source comparison isn't a moving target while drafting. Confirmed
+the two are genuinely independent via a test that drafts players and checks Consensus's own VBD number stays
+fixed while Our Board's version visibly moves for the same player.
+
+**Bowers/TE-market-gap investigation: reopened and actually closed this time, not just re-explained.** User
+pushed back on "known limitation, use your own judgment" and asked directly: how do we get the MODEL to act
+on this, not leave it to manual judgment. Deliberately avoided re-treading already-rejected angles (routes x
+YPRR matching market opinion, within-season trend features, depth-chart-rank bias, incoming-competition - all
+tested and honestly rejected in earlier sessions) and looked for something genuinely new: does REAL
+HISTORICAL preseason market consensus predict REAL FUTURE OUTCOMES beyond what this project's own stat-based
+features already capture - a fundamentally different, legitimate test from "does matching the market's
+CURRENT opinion look better," which this project has correctly and repeatedly rejected (the market is a
+diagnostic prompt, not a target to fit).
+
+**Found a real, usable historical data source, previously undiscovered by this project**: dynastyprocess/
+data's GitHub repo carries `db_fpecr.parquet` - NOT the same as the `_latest`-suffixed file this project has
+used before for a single current snapshot - a real ACCUMULATED archive of daily FantasyPros ECR scrapes since
+Dec 2019 (1.83M rows), including `redraft-{qb,rb,wr,te}` pages with real preseason (Aug-Sep) snapshots for
+every season 2021-2026. The nflreadpy downloader and the github.com/.../raw redirect both hit the same
+transient connection resets already documented elsewhere in this project for other dynastyprocess files -
+worked around by hitting `raw.githubusercontent.com` directly (confirmed reliable via both curl and Python's
+own `requests`, unlike the redirect chain).
+
+**Rigorously walk-forward tested before building anything into the pipeline**, same standard as every other
+feature in this project: for RB/WR/TE (2022-2025, the seasons with real training-data-worthy ECR history),
+built `preseason_ecr_log` (log of the real historical preseason position rank - same treatment
+`fit_rookie_curve` already gives draft pick, another real market-set ordinal) and trained Ridge with vs.
+without it. Aggregate effect was real but modest (TE Spearman roughly flat, RB/WR both improved). The
+decisive test was **the cohort that actually matters**: rows where the baseline model's own implied rank and
+the real ECR rank diverge by a lot (>=8 spots) - the exact Brock Bowers shape (a young/recently-injured
+talent the market rates far above what trailing box-score stats alone suggest). On that cohort, MAE improved
+in **all 12 tested folds (RB/WR/TE x 4 seasons), never once reversed** - RB pooled improvement +0.084, WR
++0.047, TE positive every season. The "convergent" cohort (model and market already agree) showed no
+consistent benefit, exactly as expected - a real, well-targeted, non-blanket signal, not a coincidence of
+pooling. **QB tested separately and came back weaker/mixed** (smaller samples, QB's own well-documented extra
+volatility - one of four divergent-cohort folds went the wrong direction, aggregate MAE was flat-to-slightly-
+worse) - deliberately excluded, matching this project's standing "don't blanket, check by position" rule.
+
+**Shipped for real**: `data.load_market_ecr_history` (new loader, cached via `pull_data.py` to
+`market_ecr_history.parquet`, added to the `--refresh-live` set since the CURRENT season's own preseason ECR
+keeps accumulating new scrape dates through early September); `season.compute_preseason_market_rank` (reduces
+the archive to one row per player-season: the latest Aug1-Sep10 snapshot, crosswalked to `player_id` via the
+same per-season normalized-name join pattern `paid_data.build_name_crosswalk` already established) and
+`add_preseason_market_features` (left-merge, NaN/median-imputed for seasons/players with no resolvable
+snapshot - pre-2021 seasons have no real August coverage at all). `preseason_ecr_log` added to
+`SKILL_VET_FEATURES` (flows to WR/TE directly and to RB via its existing derivation from SKILL_VET_FEATURES),
+NOT to `QB_VET_FEATURES`. Wired into both `build_season_training_table` and `build_prediction_features` (a
+real, one-line bug caught before running anything: the CURRENT season's own crosswalk needs the in-progress
+prediction TABLE's player/season identity, not `season_stats`, which has no row yet for a season that hasn't
+been played - `build_prediction_features` was fixed to crosswalk against its own `table`).
+
+**Verified on the real board, not just the isolated test**: 2025 holdout backtest improved for RB (0.802 ->
+0.806) and WR (0.809 -> 0.815), essentially flat for TE (0.825 -> 0.825, matching the isolated test's modest
+aggregate effect there), unaffected for QB (0.733 -> 0.740, small movement attributable to routine roster/
+live-data drift between runs, not this feature, since QB never received it) - Half-PPR. **Brock Bowers
+specifically: TE3 (rank 58, VBD 15.72) -> TE2 (rank 44, VBD 26.15), now ahead of Kittle** - McBride also
+gained (VBD 41.01 -> 55.76), both real, market-informed moves rather than name-targeted patches (the fix
+applies to every RB/WR/TE, not just these two). Regenerated both scoring formats' boards, both composite
+boards, and `board_data.json`; republished the same Artifact URL (data-only refresh, no layout/logic changes
+needed for this piece).
+
+Net: closed the loop the user specifically asked for - "how do we get the model to act on this instead of
+leaving it to my own judgment" - with a real, validated, generalizable fix rather than a philosophical
+explanation, using a genuinely new data source and a test methodology (real future outcomes, not market
+opinion) consistent with this project's standing discipline throughout.
+

@@ -101,9 +101,10 @@ def load_raw():
     snap_share = pd.read_parquet(RAW_DIR / "snap_share.parquet")
     contract_history = pd.read_parquet(RAW_DIR / "contract_history.parquet")
     play_volume = pd.read_parquet(RAW_DIR / "team_play_volume.parquet")
+    ecr_history = pd.read_parquet(RAW_DIR / "market_ecr_history.parquet")
     return (
         weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart,
-        sleeper_players, injuries, schedules, snap_share, contract_history, play_volume,
+        sleeper_players, injuries, schedules, snap_share, contract_history, play_volume, ecr_history,
     )
 
 
@@ -151,7 +152,7 @@ def main() -> None:
 
     (
         weekly, rosters, draft_picks, pbp, participation, ngs, depth_chart,
-        sleeper_players, injuries, schedules, snap_share, contract_history, play_volume,
+        sleeper_players, injuries, schedules, snap_share, contract_history, play_volume, ecr_history,
     ) = load_raw()
 
     print("Building season-level stats...")
@@ -162,7 +163,7 @@ def main() -> None:
     defense_strength = compute_defense_strength(enriched)
     sos = compute_strength_of_schedule(schedules, defense_strength)
     training_table = build_season_training_table(
-        season_stats, rosters, schedules, snap_share, contract_history, sos, healthy_season_stats
+        season_stats, rosters, schedules, snap_share, contract_history, sos, ecr_history, healthy_season_stats
     )
 
     print()
@@ -173,7 +174,8 @@ def main() -> None:
     models = fit_vet_models_by_position(training_table)
     durability_models = fit_durability_models_by_position(training_table)
     vet_board = build_prediction_features(
-        season_stats, args.draft_season, rosters, schedules, snap_share, contract_history, sos, healthy_season_stats
+        season_stats, args.draft_season, rosters, schedules, snap_share, contract_history, sos, ecr_history,
+        healthy_season_stats,
     )
     vet_board["ppg_pred"] = predict_vet_ppg(models, vet_board)
     vet_board["games_est"] = predict_durability(durability_models, vet_board)

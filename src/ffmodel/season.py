@@ -9,6 +9,8 @@ played - the right shape for "who should I draft," not "who should I start
 this week."
 """
 
+import re
+
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
@@ -90,6 +92,15 @@ SKILL_VET_FEATURES = COMMON_VET_FEATURES + [
     "vacated_routes_run_pg",
     "prev_snap_share_trend",
     "prev_snap_share_level",
+    # Real historical preseason market consensus (see
+    # compute_preseason_market_rank) - walk-forward validated 2026-09-04 for
+    # RB/WR/TE specifically (12/12 test-season folds improved on the cohort
+    # where this project's own stat-based prediction and the market
+    # disagree - the exact situation that motivated testing this, see the
+    # Brock Bowers investigation in CLAUDE.md). Deliberately NOT added to
+    # QB_VET_FEATURES - QB's own version of this test was weaker/mixed
+    # (small samples, QB's well-documented extra volatility).
+    "preseason_ecr_log",
 ]
 
 QB_VET_FEATURES = COMMON_VET_FEATURES + [
@@ -596,6 +607,84 @@ def add_vacated_opportunity_features(table: pd.DataFrame, vacated: pd.DataFrame)
     for col in ["vacated_targets_pg", "vacated_carries_pg", "vacated_routes_run_pg"]:
         table[col] = table[col].fillna(0)
     return table
+
+
+_NAME_SUFFIX_RE = re.compile(r"\s+(Jr\.?|Sr\.?|I{2,3}|IV)$", re.IGNORECASE)
+
+
+def _normalize_player_name(name: str) -> str:
+    """Lowercase, strip suffixes/punctuation - the same normalization
+    paid_data._normalize_name already applies elsewhere in this project for
+    matching an external source's names against player_display_name. Kept
+    local rather than cross-imported (paid_data.py's own helper is private,
+    and this project's convention - see consensus.py's own name-matching
+    helpers - is a small self-contained normalizer per module rather than
+    reaching into another module's private function).
+    """
+    name = _NAME_SUFFIX_RE.sub("", str(name)).strip()
+    name = name.replace(".", "").replace("'", "")
+    return name.lower()
+
+
+def compute_preseason_market_rank(ecr_history: pd.DataFrame, player_table: pd.DataFrame) -> pd.DataFrame:
+    """Real historical preseason FantasyPros position-rank consensus (see
+    data.load_market_ecr_history), reduced to one row per (player_id,
+    season): the LATEST snapshot in the Aug 1 - Sep 10 window that year -
+    the closest real approximation to "what did the market think right
+    before Week 1," fully known before that season is played (no leakage -
+    this is a real, dated historical record, not the CURRENT market's
+    opinion applied retroactively). `ecr` in the source data IS the
+    position rank already (fractional - FantasyPros averages several
+    sub-pages/experts per scrape), log-transformed here the same way
+    `fit_rookie_curve` already treats draft pick (another real, market-set
+    ordinal).
+
+    Walk-forward validated 2026-09-04 (see CLAUDE.md) as a real, generalizable
+    signal - critically, tested against REAL FUTURE OUTCOMES, not against how
+    well it matches the market's own opinion (the test this project has
+    correctly and repeatedly rejected ideas on before, e.g. the routes x
+    YPRR interaction feature 2026-08-27). Specifically improved accuracy, in
+    every one of 12 tested walk-forward folds (RB/WR/TE x 2022-2025), in the
+    exact cohort motivating this feature: players where this project's own
+    stat-based model and the market diverge by a lot (|model rank - ECR
+    rank| >= 8) - the Brock Bowers-shaped case (young/recently-injured
+    talent the market rates far above what trailing box-score stats alone
+    would suggest). The "convergent" cohort (model and market already
+    roughly agree) showed no consistent benefit, as expected - matches
+    SKILL_VET_FEATURES' own docstring note on why this isn't added for QB
+    (weaker/mixed there, smaller samples).
+    """
+    ecr = ecr_history.copy()
+    ecr["season"] = ecr["scrape_date"].dt.year
+    preseason = ecr[
+        (ecr["scrape_date"].dt.month == 8) | ((ecr["scrape_date"].dt.month == 9) & (ecr["scrape_date"].dt.day <= 10))
+    ]
+    preseason = preseason.sort_values("scrape_date")
+    latest = preseason.groupby(["season", "page_type", "player"], as_index=False).last()
+    latest["position"] = latest["page_type"].str.removeprefix("redraft-").str.upper()
+    latest["normalized_name"] = latest["player"].map(_normalize_player_name)
+
+    # Per-season crosswalk (a player's own charted name/position for THAT
+    # season, not one global lookup) - matches build_name_crosswalk's
+    # existing per-season design in paid_data.py.
+    players = player_table[["player_id", "player_display_name", "position", "season"]].drop_duplicates()
+    players["normalized_name"] = players["player_display_name"].map(_normalize_player_name)
+    players = players.drop_duplicates(subset=["season", "position", "normalized_name"], keep="first")
+
+    merged = latest.merge(players, on=["season", "position", "normalized_name"], how="inner")
+    merged["preseason_ecr_log"] = np.log(merged["ecr"])
+    return merged[["player_id", "season", "preseason_ecr_log"]]
+
+
+def add_preseason_market_features(table: pd.DataFrame, market_rank: pd.DataFrame) -> pd.DataFrame:
+    """Merge preseason_ecr_log onto a training/prediction table. Left join -
+    NaN (median-imputed downstream, same treatment as every other sparse
+    feature in this pipeline) for any player/season with no resolvable
+    market snapshot: seasons before this project's data source has real
+    August coverage (2020 and earlier - see compute_preseason_market_rank),
+    or a name that didn't cross-walk.
+    """
+    return table.merge(market_rank, on=["player_id", "season"], how="left")
 
 
 def build_head_coach_history(schedules: pd.DataFrame) -> pd.DataFrame:
@@ -1127,6 +1216,7 @@ def build_season_training_table(
     snap_share: pd.DataFrame,
     contract_history: pd.DataFrame,
     sos: pd.DataFrame,
+    ecr_history: pd.DataFrame,
     healthy_season_stats: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build the veteran training table: for each player-season Y where we
@@ -1163,6 +1253,7 @@ def build_season_training_table(
     table = add_snap_share_trend_features(table, compute_snap_share_trend(snap_share))
     table = add_contract_signal_features(table, contract_history)
     table = add_strength_of_schedule_features(table, sos)
+    table = add_preseason_market_features(table, compute_preseason_market_rank(ecr_history, season_stats))
     return table
 
 
@@ -1267,6 +1358,7 @@ def build_prediction_features(
     snap_share: pd.DataFrame,
     contract_history: pd.DataFrame,
     sos: pd.DataFrame,
+    ecr_history: pd.DataFrame,
     healthy_season_stats: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build feature rows for predicting `target_season`, which hasn't been
@@ -1300,6 +1392,7 @@ def build_prediction_features(
     table = add_snap_share_trend_features(table, compute_snap_share_trend(snap_share))
     table = add_contract_signal_features(table, contract_history)
     table = add_strength_of_schedule_features(table, sos)
+    table = add_preseason_market_features(table, compute_preseason_market_rank(ecr_history, table))
     return table
 
 
