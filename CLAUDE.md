@@ -4726,3 +4726,60 @@ population than genuine depth_team>=2 bench players.
 Regenerated both scoring formats' boards, both composite boards, and `board_data.json`; republished the same
 Artifact URL.
 
+### 2026-09-04 (cont'd) - slot-track-starter role-security fix: walk-forward validated, then shipped
+
+User: "start on both" - the rookie-curve market-consensus extension (done above) and the flagged-but-not-
+fixed WR role-security bug. Did the validation this entry's predecessor explicitly said was needed before
+shipping anything.
+
+**Built the historical equivalent of the live pos_slot/pos_rank distinction.** `nfl.load_depth_charts()`'s
+historical schema (no pos_slot at all) uses `depth_team` (starter=1/backup=2/deeper=3+), where multiple real
+players legitimately TIE at depth_team==1 for a real 3-WR personnel set - confirmed at scale: 212 real team-
+seasons (2018-2025) show a 3-way tie there, 212 show a clean 2-way tie, RB/TE show only 1-2 instances total
+(3-way-tied co-starters is essentially a WR-only phenomenon - real football sense, teams don't run 3-RB or
+3-TE personnel as a base package). This is the direct historical analog of "starter of your own depth-chart
+track" - the schema doesn't know WHICH track (X/Z/slot) each tied player belongs to, but doesn't need to for
+this test: the question is just whether being tied at the top (regardless of count) predicts a different bias
+than genuine bench.
+
+**Merged against this project's own real walk-forward veteran-model residuals** (`compute_walk_forward_
+residuals`, same real-outcomes standard as every other feature test here - not a new ad-hoc model). Result,
+WR only (RB/TE had too few 3-way-tied instances to test): a 3-way-tied starter shows essentially ZERO bias
+(mean resid -0.02 ppg, n=290, p=0.93) - statistically indistinguishable from a clean, uncontested WR1/WR2
+(+0.27 ppg, p=0.15, also not significant) - while genuine bench (depth_team>=2) shows a real, highly
+significant overprediction bias (-0.50 ppg, n=449, p<0.0001). The direct tied-starter-vs-bench comparison is
+itself significant (mean diff +0.48 ppg, p=0.026) - real, decisive evidence these are two different
+populations currently getting the identical treatment, not just a compelling live-data anecdote.
+
+**Shipped `compute_slot_track_starters`** (season.py): for the LIVE current-season depth chart (which DOES
+have `pos_slot`), flags any WR who is the minimum `pos_rank` within their own team+pos_slot group - i.e. the
+starter of their own track, regardless of what their flattened overall `depth_chart_rank` says. Wired into
+`apply_role_security_discount`: a WR exempted this way skips the 0.78x discount even if `depth_chart_rank>=3`.
+Merged in `build_draft_rankings.py` right alongside the existing `depth_chart_rank` merge. RB/TE/QB gates
+untouched (no real evidence there, and no real 3-way-co-starter population to have tested in the first place).
+
+Worth noting: this directly reverses a documented judgment call from an earlier, unvalidated pass at the same
+merge site ("pos_slot instead distinguishes different depth-chart columns... and isn't what we want here") -
+that comment predates this walk-forward test; today's evidence says pos_slot IS exactly the right signal for
+this specific purpose, just not for computing `depth_chart_rank` itself (which still correctly uses the
+flattened pos_rank everywhere else).
+
+**Verified on the real board (both scoring formats), real and substantial movement, not oversold**: Golden
+VBD -60.3 -> -41.98 (rank 185->158), Lemon -40.22 -> -16.23 (rank 148->120, the single biggest mover),
+Stribling -61.02 -> -42.89 (rank 186->159), Jakobi Meyers -9-ish -> **+13.97 (now above replacement)**,
+Jauan Jennings -> -9.19 (nearly at replacement), Cooper Kupp -18.06, Calvin Ridley -41.58. Explicitly checked
+the fix doesn't over-fire: genuine deep-bench WRs (depth_chart_rank>=5 - Tank Dell, Ricky Pearsall, Christian
+Kirk, Jayden Higgins) remain heavily discounted as before (VBD -47 to -77), and 28 WRs still sit at
+depth_chart_rank==3 with a real, large negative VBD even after the exemption fires - the fix removes ONE
+specific wrongly-applied bias, it doesn't force every exempted player to look good; several genuinely have a
+weak underlying rate/opportunity prediction for other, separately-evidenced reasons (Golden and Stribling
+both still negative, for instance - the exemption helped, it didn't fully resolve either case, which is the
+honest, expected outcome of fixing one specific bias rather than force-fitting a bigger number).
+
+Backtest headline numbers unchanged (board-build-time fix, not a training-time change - same as every other
+role-transition correction in this pipeline). Regenerated both scoring formats' boards, both composite
+boards, and `board_data.json`; republished the same Artifact URL. Closes out both halves of "start on both"
+from this session - the rookie-curve extension and this fix were pursued as two genuinely separate
+investigations (different populations, different data sources, different validation), not bundled together
+just because they were requested in the same breath.
+

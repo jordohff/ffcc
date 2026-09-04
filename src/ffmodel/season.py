@@ -2607,6 +2607,53 @@ def compute_team_position_ceiling(
     return pd.DataFrame(rows).melt(id_vars="team", var_name="position", value_name="ceiling")
 
 
+def compute_slot_track_starters(depth_chart: pd.DataFrame) -> pd.DataFrame:
+    """For WR, flags each player who is the STARTER of their own depth-
+    chart track (X/Z/slot - `pos_slot`), i.e. the lowest `pos_rank` among
+    all players sharing that team+pos_slot - even when their OVERALL
+    pos_rank (a flattened 1-7 enumeration across all three tracks, the
+    field this pipeline uses as `depth_chart_rank`) looks like "3rd
+    string." A team running real 3-WR personnel has THREE simultaneous
+    starters, not one starter + two bench guys, and the flattened ladder
+    can't tell those apart on its own - see apply_role_security_discount.
+
+    Found 2026-09-04, investigating why Matthew Golden/Makai Lemon/De'Zhaun
+    Stribling (real starters per contemporaneous news - Jordan Love named
+    Golden the 2026 starting X receiver) all showed depth_chart_rank==3 and
+    were getting the WR role-security discount as if bench. Checked league-
+    wide: 32 players share this exact pos_rank==3/pos_slot==8 signature
+    (one on almost every team), including established real starters (Cooper
+    Kupp, Keenan Allen, Calvin Ridley, Jakobi Meyers, Jauan Jennings).
+
+    Walk-forward VALIDATED before shipping, not just a plausible live-data
+    anecdote (this project has reverted corrections that skipped this step
+    before - the age x elite interaction, the QB streaming multiplier).
+    nflverse's HISTORICAL depth chart uses a different, cruder schema (no
+    pos_slot - see load_current_depth_chart) with `depth_team`, where
+    MULTIPLE real players legitimately tie at depth_team==1 for a 3-WR
+    set (confirmed: 212 real team-seasons 2018-2025 show a 3-way tie there,
+    212 show a 2-way tie) - the historical analog of "starter of your own
+    track" is simply "tied at the team's own minimum depth_team," since
+    that schema doesn't separate WHICH track each tied player belongs to.
+    Merged this against this project's own real walk-forward veteran-model
+    residuals (compute_walk_forward_residuals, same real-outcomes standard
+    as every other feature test here): a 3-way-tied WR starter shows
+    essentially ZERO bias (mean resid -0.02 ppg, n=290, p=0.93) -
+    statistically indistinguishable from a clean, uncontested WR1/WR2
+    (+0.27 ppg, p=0.15, also not significant) - while genuine bench
+    (depth_team >= 2) shows a real, highly significant overprediction bias
+    (-0.50 ppg, n=449, p<0.0001). The direct tied-starter-vs-bench
+    comparison is itself significant (mean diff +0.48 ppg, p=0.026) -
+    real evidence these are two different populations, not an artifact of
+    one live anecdote. RB/TE essentially never have 3 real co-starters at
+    one position (n=1 and n=2 historical team-seasons respectively, too few
+    to test) - this exemption is WR-only, matching where the real signal is.
+    """
+    wr = depth_chart[depth_chart["pos_abb"] == "WR"].copy()
+    wr["is_slot_track_starter"] = wr.groupby(["team", "pos_slot"])["pos_rank"].transform("min") == wr["pos_rank"]
+    return wr[["gsis_id", "is_slot_track_starter"]].dropna(subset=["gsis_id"]).rename(columns={"gsis_id": "player_id"})
+
+
 ROLE_SECURITY_DEPTH_THRESHOLD = {"RB": 3, "WR": 3, "TE": 2, "QB": 2}
 """Current depth_chart_rank at or above which a player gets the role-
 security discount (ROLE_SECURITY_DISCOUNT). See apply_role_security_discount's
@@ -2734,6 +2781,14 @@ def apply_role_security_discount(board: pd.DataFrame) -> pd.DataFrame:
     depth_threshold = board["position"].map(ROLE_SECURITY_DEPTH_THRESHOLD)
     discount = board["position"].map(ROLE_SECURITY_DISCOUNT)
     gated = (board["depth_chart_rank"] >= depth_threshold).fillna(False)
+
+    # WR-only exemption for a real starter of their own depth-chart track
+    # (X/Z/slot) whose OVERALL depth_chart_rank looks like "3rd string"
+    # purely because it flattens 3 separate tracks into one ladder - see
+    # compute_slot_track_starters for the walk-forward validation.
+    if "is_slot_track_starter" in board.columns:
+        exempt = board["is_slot_track_starter"].fillna(False) & (board["position"] == "WR")
+        gated = gated & ~exempt
 
     board.loc[gated, "ppg_pred"] = board.loc[gated, "ppg_pred"] * discount[gated]
     board["total_points_pred"] = board["ppg_pred"] * board["games_est"]

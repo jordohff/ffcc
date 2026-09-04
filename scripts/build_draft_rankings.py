@@ -53,6 +53,7 @@ from ffmodel.season import (
     apply_team_opportunity_cap,
     apply_unrostered_games_est,
     build_season_training_table,
+    compute_slot_track_starters,
     build_team_offense_summary,
     compute_defense_strength,
     compute_efficiency_ceiling,
@@ -306,6 +307,7 @@ def main() -> None:
         .rename(columns={"gsis_id": "player_id", "pos_rank": "depth_chart_rank"})
     )
     board = board.merge(depth, on="player_id", how="left")
+    board = board.merge(compute_slot_track_starters(depth_chart), on="player_id", how="left")
 
     print("Applying role-security discount for players with no current-depth-chart security...")
     board = apply_role_security_discount(board)
