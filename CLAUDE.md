@@ -4834,3 +4834,66 @@ line number for this splice; always re-derive the insertion point fresh from the
 exactly one occurrence before AND after, and separately grep-check a real content anchor near the boundary
 (not just run the JS test suite, which cannot catch this class of bug) before considering a publish verified.
 
+### 2026-09-04 (cont'd) - "buy the recovering star" tested and REJECTED: high-role players coming off a real
+injury underperform the model's OWN prediction, not the reverse (Tucker Kraft motivating case)
+
+User asked to test a specific, real-world-motivated hypothesis: does the model correctly value a player who
+was in (or heading into) a genuinely high target/snap role before a real injury cut their season short -
+Tucker Kraft (GB TE) as the concrete example. Verified his real situation first: a torn ACL in November 2025
+(after a real breakout - TE2 in scoring behind only McBride at the time), activated off PUP Aug 1 2026,
+participated in full 11-on-11 drills Aug 16, multiple real reports confirming he's "on track for Week 1" -
+a clean, on-schedule recovery, not a lingering/uncertain one. Real market gap confirmed: all 9 external
+consensus sources have him TE5-7 (consensus_overall_rank ~68), our own board has him TE17-20 (rank ~116-123)
+- a large, real divergence, the same shape that's motivated several other real fixes this session (Golden,
+Lemon, Stribling, Bowers).
+
+**Built a proper walk-forward test rather than assuming the market-gap intuition was right** (the standing
+discipline this whole project has followed - "the market is a diagnostic prompt, not a target to fit"). Used
+this project's own real walk-forward veteran residuals (`compute_walk_forward_residuals` - already reflects
+the CURRENT full pipeline: GBM durability, the TE elite-usage durability boost, AND the preseason market-
+consensus feature shipped earlier this same session) and compared real (actual - predicted) ppg error for a
+"high role, recent real injury" cohort (top-quartile `wavg_target_share` within position AND
+`prev_games_played < 10`) against a "high role, stayed healthy" comparison group, TE/RB/WR, 2018-2025.
+
+**Result: the opposite of what the market-gap intuition would predict.** High-role players coming off a
+recent injury systematically UNDERPERFORM the model's own already-durability-adjusted prediction - they do
+not exceed it:
+- TE: high-role+injured mean ppg_resid = **-0.99** (n=23, p=0.029, real) vs. high-role+healthy +0.07 (no
+  bias, p=0.72). Direct comparison significant (p=0.030).
+- WR: high-role+injured mean ppg_resid = **-1.64** (n=45, p=0.0023, real) vs. high-role+healthy +0.04 (no
+  bias). Direct comparison significant (p=0.0027) - and this HELD UP out-of-sample on a genuine calibrate
+  (2018-2021)/validate (2022-2025) split, validation period -2.58 ppg, p=0.0019 (not just a pooled artifact).
+- RB: no real signal either direction (n=18, p=0.58 - too few real instances to say anything).
+
+**Refined further to rule out a mixed-population confound**, since a blunt "played fewer than 10 games" gate
+mixes real acute injuries (Kraft's ACL-tear shape) with benched/committee/unclear-cause absences: restricted
+to players with a DOCUMENTED severe injury-report designation (Out/Doubtful) in their own prior season - the
+pattern held, and for TE actually got STRONGER (-1.24 ppg, n=14, p=0.0094) - not an artifact of averaging in
+non-injury low-games players.
+
+**Conclusion, and why nothing was shipped**: this is a real, validated, out-of-sample-confirmed finding that
+runs directly counter to the "buy the recovering star, the market knows something we don't" theory that
+motivated the investigation - the honest, disciplined outcome per this project's standing practice (see the
+McCaffrey old-injury pattern, the Bo Nix/Burrow durability tests, and multiple other rejected-corrections
+this session alone) of following the evidence even when it contradicts the motivating anecdote. Plausible,
+real-world-sensible mechanism: not every "clean" ACL recovery is actually 100% by Week 1 in practice - lost
+explosiveness, a team managing snap counts/routes early in the return, or a subtler decline the box score
+doesn't immediately show could all produce exactly this pattern, and durability corrections (which address
+AVAILABILITY) structurally can't capture a RATE effect like this.
+
+**Direct read on Kraft specifically**: his current suppression (ppg_pred 7.72 vs. his own real 2025 rate of
+12.65) is NOT shown by this test to be a bug worth correcting upward - if anything, the real historical
+record for players in his exact situation argues for real caution, not optimism, regardless of how strongly
+the market currently feels otherwise. His games_est (13.52) is already fairly generous (~0.8 games behind a
+fully healthy TE1, reflecting the already-shipped TE elite-usage durability boost correctly firing for him -
+his `wavg_target_share` of 0.149 clears that boost's 0.125 gate) - the gap is concentrated in the RATE
+estimate, which this test suggests is more defensible than the market-gap alone would imply. This does not
+rule out that OTHER, already-documented mechanisms (the Ridge-shrinkage-for-elite-profiles pattern, and
+multi-year wavg_ppg dilution from a weaker rookie/sophomore season) are still contributing to his specific
+number - those remain open, separately-diagnosed, accepted limitations, not resolved or reopened by this
+result.
+
+Standing reference for future sessions: if a similar "recovering star the market loves" case comes up again
+(high role + real recent injury), this test is the answer, already run and validated - don't re-litigate the
+market-gap intuition from scratch; the real, out-of-sample evidence says caution is warranted, not a boost.
+
