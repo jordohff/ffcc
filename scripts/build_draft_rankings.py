@@ -200,7 +200,7 @@ def main() -> None:
 
     print(f"Projecting {args.draft_season} rookie class from draft capital...")
     rookie_table = build_rookie_training_table(season_stats, draft_picks[draft_picks["season"] < args.draft_season])
-    rookie_curve = fit_rookie_curve(rookie_table)
+    rookie_curve = fit_rookie_curve(rookie_table, ecr_history)
     outcome_range = compute_rookie_outcome_range(rookie_table)
     current_picks = draft_picks[draft_picks["season"] == args.draft_season]
     missing_career_stats = find_players_missing_career_stats(season_stats, draft_picks, rosters, args.draft_season)
@@ -208,7 +208,7 @@ def main() -> None:
         print(f"  {len(missing_career_stats)} real, active player(s) drafted in a prior season have "
               f"NO career stats at all (a data gap, not a crosswalk issue) - projecting from draft capital")
         current_picks = pd.concat([current_picks, missing_career_stats], ignore_index=True)
-    rookie_board = project_rookies(current_picks, rookie_curve)
+    rookie_board = project_rookies(current_picks, rookie_curve, ecr_history)
     rookie_board = add_rookie_outcome_range(rookie_board, outcome_range)
     rookie_board["total_points_pred"] = rookie_board["ppg_pred"] * rookie_board["games_est"]
     rookie_board = rookie_board.rename(columns={"pfr_player_name": "player_display_name"})
@@ -353,7 +353,7 @@ def main() -> None:
 
     print("Running Monte Carlo season simulation...")
     vet_residuals = compute_walk_forward_residuals(training_table)
-    rookie_residuals = compute_rookie_walk_forward_residuals(rookie_table)
+    rookie_residuals = compute_rookie_walk_forward_residuals(rookie_table, ecr_history)
     # A handful of UDFA rookies have no resolvable player_id (NaN) - the same
     # NaN-merge-fan-out bug this project has hit repeatedly (pandas treats
     # NaN as matching NaN, so a null-id row on both sides fans out into

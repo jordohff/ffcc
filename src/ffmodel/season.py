@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.impute import SimpleImputer
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.pipeline import Pipeline
 
 from ffmodel.features import add_fantasy_target, add_next_gen_features, add_route_features
@@ -1769,11 +1769,40 @@ estimate itself.
 """
 
 
-def fit_rookie_curve(rookie_table: pd.DataFrame) -> pd.DataFrame:
+ROOKIE_MARKET_FEATURE_POSITIONS = {"RB", "WR", "TE"}
+"""Positions whose rookie curve blends in preseason_ecr_log alongside
+log(pick) - see fit_rookie_curve. QB deliberately excluded: walk-forward
+tested 2026-09-04 alongside RB/WR/TE and came back the wrong direction
+(pooled MAE 4.47 -> 4.72, Spearman 0.523 -> 0.491, divergent-cohort
+MAE -0.25) - the same weaker/mixed QB result already found for the
+VETERAN version of this feature (see SKILL_VET_FEATURES), now confirmed
+separately for rookies too. QB stays on the pure log(pick) curve.
+"""
+
+
+def _with_display_name_fallback(table: pd.DataFrame) -> pd.DataFrame:
+    """draft_picks-derived tables (current_picks in project_rookies, the
+    never-played branch of build_rookie_training_table) carry
+    `pfr_player_name`, not `player_display_name` - compute_preseason_
+    market_rank's crosswalk needs the latter. Falls back only where
+    player_display_name is missing/null, never overwrites a real one.
+    """
+    table = table.copy()
+    if "player_display_name" not in table.columns:
+        table["player_display_name"] = pd.NA
+    if "pfr_player_name" in table.columns:
+        table["player_display_name"] = table["player_display_name"].fillna(table["pfr_player_name"])
+    return table
+
+
+def fit_rookie_curve(rookie_table: pd.DataFrame, ecr_history: pd.DataFrame) -> pd.DataFrame:
     """Historical rookie-season PPG and games played as a smooth function of
     OVERALL DRAFT PICK, fit per position - the whole "model" for projecting
     incoming rookies, since there's no prior-NFL-season data to anchor a
-    regression on.
+    regression on. For RB/WR/TE (see ROOKIE_MARKET_FEATURE_POSITIONS), also
+    blends in the rookie's OWN real preseason market consensus rank
+    (`preseason_ecr_log` - see compute_preseason_market_rank), the same
+    real, dated historical signal already validated for the veteran model.
 
     Replaces a coarser round-bucket average. That approach gave every rookie
     in the same (position, round) bucket an IDENTICAL projection, which
@@ -1784,8 +1813,8 @@ def fit_rookie_curve(rookie_table: pd.DataFrame) -> pd.DataFrame:
     ppg_pred/games_est, which is obviously wrong given how differently those
     two draft slots are actually valued.
 
-    Fit is a simple log-linear regression, `ppg ~ a + b*log(pick)` (and the
-    same shape for games_played), per position - not a black-box model,
+    Base fit is a simple log-linear regression, `ppg ~ a + b*log(pick)` (and
+    the same shape for games_played), per position - not a black-box model,
     matching this project's preference for something easily inspected and
     second-guessed. log(pick) rather than raw pick because draft capital
     value decays roughly log-linearly (well documented in draft-value chart
@@ -1797,23 +1826,57 @@ def fit_rookie_curve(rookie_table: pd.DataFrame) -> pd.DataFrame:
     QB 0.45, RB 0.35, TE 0.32, WR 0.30 - real, usable signal (a flat
     within-bucket average has an effective R² of 0), though naturally
     noisier than the veteran models since a single college/combine profile
-    says much less than a played NFL season does. Verified against the 2026
-    class: Love (pick 3) now projects to ~16.8 ppg vs. Price (pick 32) at
-    ~8.8 ppg - the two picks that were previously identical are now clearly
-    differentiated, and this generalizes to every future draft class
-    automatically (it's a function of pick number, not a hardcoded lookup
-    for any specific player).
+    says much less than a played NFL season does.
+
+    preseason_ecr_log addition (2026-09-04, prompted by three flagged
+    players - Matthew Golden, KC Concepcion, Makai Lemon - whose landing-
+    spot/situational upside the pick-only curve structurally can't see):
+    walk-forward tested (2021-2025, same methodology as the veteran
+    feature) for real improvement on REAL rookie-season outcomes, not
+    market opinion. Real, consistent gains at every one of RB/WR/TE:
+    Spearman improved in every WR fold tested; pooled MAE improved for all
+    three (RB 2.94->2.93, WR 2.28->2.25, TE 1.76->1.64); the divergent
+    cohort (pick-only prediction and real market rank disagree by >=8
+    spots - exactly the Concepcion/Lemon shape) improved for all three
+    (RB +0.08, WR +0.03, TE +0.10, n=98/158/69). QB tested the same way and
+    came back the wrong direction (see ROOKIE_MARKET_FEATURE_POSITIONS) -
+    excluded, matching the veteran feature's own QB exclusion.
+
+    Sparse (pre-2021 draft classes have no real August ECR coverage, and a
+    handful of names never cross-walk) - median-imputed within each
+    position's training data, same treatment SKILL_VET_FEATURES gets via
+    its own pipeline's SimpleImputer. The impute value is stored per
+    position (`ecr_impute_value`) so project_rookies can apply the exact
+    same fallback to a player whose OWN class doesn't yet have a resolvable
+    preseason snapshot.
     """
+    rookie_table = _with_display_name_fallback(rookie_table)
+    market_rank = compute_preseason_market_rank(ecr_history, rookie_table)
+    rookie_table = rookie_table.merge(market_rank, on=["player_id", "season"], how="left")
+
     rows = []
     for position, pos_table in rookie_table.groupby("position"):
         log_pick = np.log(pos_table["pick"].to_numpy(dtype=float))
-        ppg_slope, ppg_intercept = np.polyfit(log_pick, pos_table["ppg"].to_numpy(dtype=float), 1)
         games_slope, games_intercept = np.polyfit(log_pick, pos_table["games_played"].to_numpy(dtype=float), 1)
+
+        use_market = position in ROOKIE_MARKET_FEATURE_POSITIONS and pos_table["preseason_ecr_log"].notna().any()
+        if use_market:
+            ecr_impute_value = pos_table["preseason_ecr_log"].median()
+            ecr_filled = pos_table["preseason_ecr_log"].fillna(ecr_impute_value).to_numpy(dtype=float)
+            X = np.column_stack([log_pick, ecr_filled])
+            reg = LinearRegression().fit(X, pos_table["ppg"].to_numpy(dtype=float))
+            ppg_intercept, ppg_pick_coef, ppg_ecr_coef = reg.intercept_, reg.coef_[0], reg.coef_[1]
+        else:
+            ppg_pick_coef, ppg_intercept = np.polyfit(log_pick, pos_table["ppg"].to_numpy(dtype=float), 1)
+            ppg_ecr_coef, ecr_impute_value = 0.0, 0.0
+
         rows.append(
             {
                 "position": position,
                 "ppg_intercept": ppg_intercept,
-                "ppg_slope": ppg_slope,
+                "ppg_pick_coef": ppg_pick_coef,
+                "ppg_ecr_coef": ppg_ecr_coef,
+                "ecr_impute_value": ecr_impute_value,
                 "games_intercept": games_intercept,
                 "games_slope": games_slope,
                 "n": len(pos_table),
@@ -1822,22 +1885,42 @@ def fit_rookie_curve(rookie_table: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def project_rookies(current_draft_picks: pd.DataFrame, rookie_curve: pd.DataFrame) -> pd.DataFrame:
+def project_rookies(
+    current_draft_picks: pd.DataFrame, rookie_curve: pd.DataFrame, ecr_history: pd.DataFrame
+) -> pd.DataFrame:
     """Apply each position's historical pick -> production curve (see
     fit_rookie_curve) to this year's actual draft class, giving each rookie
     a `ppg_pred` and `games_est` the same way veterans get one from the
     trained model - varying smoothly with the rookie's own pick number
-    instead of only their draft round.
+    (and, for RB/WR/TE, their own real preseason market consensus rank -
+    see fit_rookie_curve) instead of only their draft round.
     """
     picks = current_draft_picks[current_draft_picks["position"].isin(POSITION_VET_FEATURES)].copy()
+    picks = picks.rename(columns={"gsis_id": "player_id"})
+
+    # Row-level market rank for THIS draft class - a real, dated snapshot
+    # (compute_preseason_market_rank only ever returns real historical
+    # rows, so a class with no resolvable preseason coverage yet - e.g. a
+    # very late UDFA no site bothered ranking - correctly gets NaN here,
+    # not a fabricated value; the ecr_impute_value fallback below handles it
+    # the same way training-time gaps are handled).
+    picks_for_crosswalk = _with_display_name_fallback(picks)
+    market_rank = compute_preseason_market_rank(ecr_history, picks_for_crosswalk)
+    picks = picks.merge(market_rank, on=["player_id", "season"], how="left")
+
     picks = picks.merge(rookie_curve, on="position", how="left")
     log_pick = np.log(picks["pick"])
-    picks["ppg_pred"] = (picks["ppg_intercept"] + picks["ppg_slope"] * log_pick).clip(lower=0)
+    ecr_value = picks["preseason_ecr_log"].fillna(picks["ecr_impute_value"])
+    picks["ppg_pred"] = (
+        picks["ppg_intercept"] + picks["ppg_pick_coef"] * log_pick + picks["ppg_ecr_coef"] * ecr_value
+    ).clip(lower=0)
     raw_games = picks["games_intercept"] + picks["games_slope"] * log_pick
     ceiling = picks["position"].map(ROOKIE_GAMES_CEILING).fillna(17)
     picks["games_est"] = raw_games.clip(lower=0).combine(ceiling, min)
-    picks = picks.rename(columns={"gsis_id": "player_id"})
-    return picks.drop(columns=["ppg_intercept", "ppg_slope", "games_intercept", "games_slope", "n"])
+    return picks.drop(columns=[
+        "ppg_intercept", "ppg_pick_coef", "ppg_ecr_coef", "ecr_impute_value",
+        "games_intercept", "games_slope", "n", "preseason_ecr_log",
+    ])
 
 
 def _round_bucket(round_num: pd.Series) -> pd.Series:
@@ -1955,7 +2038,7 @@ def compute_walk_forward_residuals(
 
 
 def compute_rookie_walk_forward_residuals(
-    rookie_table: pd.DataFrame, start_season: int = 2018, end_season: int = 2026
+    rookie_table: pd.DataFrame, ecr_history: pd.DataFrame, start_season: int = 2018, end_season: int = 2026
 ) -> pd.DataFrame:
     """Same idea as compute_walk_forward_residuals, but for the ROOKIE curve
     (fit_rookie_curve) instead of the veteran Ridge model - a true rookie
@@ -1963,21 +2046,33 @@ def compute_rookie_walk_forward_residuals(
     noisier, higher-variance guess than a veteran's own trailing history,
     and using veteran residual variance for rookies in simulate_season_
     outcomes would understate that. Walk-forward: fit the pick->production
-    curve on draft classes before each test season, apply it to that
-    season's real class, and keep the real (actual - predicted) errors.
+    curve (pick + preseason_ecr_log for RB/WR/TE, see fit_rookie_curve) on
+    draft classes before each test season, apply it to that season's real
+    class, and keep the real (actual - predicted) errors.
     """
+    # fit_rookie_curve does its own preseason_ecr_log merge internally (for
+    # whatever `train` slice it's given each fold) - only `test` needs one
+    # computed here, and separately, to avoid a duplicate-column collision
+    # from merging the same market_rank table twice onto the same rows.
+    rookie_table_named = _with_display_name_fallback(rookie_table)
+    market_rank = compute_preseason_market_rank(ecr_history, rookie_table_named)
+
     results = []
     for test_season in range(start_season, end_season):
         train = rookie_table[rookie_table["season"] < test_season]
         test = rookie_table[rookie_table["season"] == test_season].copy()
         if train.empty or test.empty:
             continue
-        curve = fit_rookie_curve(train)
-        test = test.merge(curve, on="position", how="left").dropna(subset=["ppg_slope"])
+        test = test.merge(market_rank, on=["player_id", "season"], how="left")
+        curve = fit_rookie_curve(train, ecr_history)
+        test = test.merge(curve, on="position", how="left").dropna(subset=["ppg_pick_coef"])
         if test.empty:
             continue
         log_pick = np.log(test["pick"].to_numpy(dtype=float))
-        ppg_pred = (test["ppg_intercept"] + test["ppg_slope"] * log_pick).clip(lower=0)
+        ecr_value = test["preseason_ecr_log"].fillna(test["ecr_impute_value"])
+        ppg_pred = (
+            test["ppg_intercept"] + test["ppg_pick_coef"] * log_pick + test["ppg_ecr_coef"] * ecr_value
+        ).clip(lower=0)
         raw_games = test["games_intercept"] + test["games_slope"] * log_pick
         ceiling = test["position"].map(ROOKIE_GAMES_CEILING).fillna(17)
         games_pred = raw_games.clip(lower=0).combine(ceiling, min)

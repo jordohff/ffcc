@@ -4633,3 +4633,96 @@ leaving it to my own judgment" - with a real, validated, generalizable fix rathe
 explanation, using a genuinely new data source and a test methodology (real future outcomes, not market
 opinion) consistent with this project's standing discipline throughout.
 
+### 2026-09-04 (cont'd) - rookie curve gets the same preseason-market-consensus feature; a real, large,
+league-wide role-security bug found (flagged, not yet fixed) - Matthew Golden/KC Concepcion/Makai Lemon/
+De'Zhaun Stribling investigation
+
+User pushed further on the rookie-WR gap: "we've had a previous focus on how rookie RBs do so well, but for
+rookie WRs you only have a high VBD for [Carnell] Tate. There are also second year WRs with bad VBD that are
+in better situations such as Matthew Golden" - asked to look at Golden, KC Concepcion, Makai Lemon (later
+also De'Zhaun Stribling). Two genuinely separate findings came out of this, one shipped, one deliberately not.
+
+**Real bug fixed first, mechanical, no judgment call**: Stribling's `draft_picks.parquet` cache had a stale
+`gsis_id` (NaN) despite the already-existing pfr_id crosswalk fix (2026-08-13) working fine on a FRESH pull -
+nflreadpy's own `load_players()` ID-sync source had simply caught up to his ID since the cache was last
+built. Re-pulled `draft_picks.parquet` (`--force`) and it resolved (`00-0041035`) - confirmed as a real,
+current 2nd-round pick (#33 overall, SF) via web search, not the UDFA/no-gsis_id population his old board
+entry looked like. Honest note: fixing the crosswalk alone made his OWN VBD look WORSE (-51 -> -67), because
+it exposed him to the role-security discount below for the first time - not a regression, just correctly
+applying an existing (probably miscalibrated for his specific role-type) rule that a bug had been
+accidentally shielding him from.
+
+**Rookie curve extended with preseason_ecr_log (RB/WR/TE), shipped.** Direct extension of the veteran feature
+shipped earlier the same day - the natural next step already flagged in that entry. `fit_rookie_curve`
+(season.py) now fits `ppg ~ a + b*log(pick) + c*preseason_ecr_log` (2-feature OLS via sklearn
+`LinearRegression`, replacing the old 1D `np.polyfit`) for RB/WR/TE - the rookie's OWN real historical
+preseason ECR in their draft year (confirmed the market DOES rank true rookies in these boards from week one,
+not just after an established track record - Concepcion/Lemon/Stribling all resolve in the real Aug-Sep 2026
+`redraft-wr` snapshots). QB kept on the pure pick-only curve (`ppg_ecr_coef` forced to 0) - walk-forward
+tested separately and came back the wrong direction (pooled MAE 4.47 -> 4.72, Spearman 0.523 -> 0.491,
+divergent-cohort -0.25), the same weaker/mixed QB result already found for the veteran version of this
+feature, now independently confirmed for rookies too. `ROOKIE_MARKET_FEATURE_POSITIONS = {RB, WR, TE}`
+records this.
+
+Walk-forward validated 2021-2025 (same methodology as the veteran feature - the ECR archive has no real
+August coverage before 2021): real, consistent gains at all three included positions - pooled MAE improved
+(RB 2.94->2.93, WR 2.28->2.25, TE 1.76->1.64), Spearman improved (RB 0.469->0.511, WR 0.592->0.611, TE
+0.593->0.627), and WR specifically improved in EVERY SINGLE test-season fold's Spearman (2022-2025), the
+cleanest result of any feature tested this project. The divergent cohort (pick-only prediction and real
+market rank disagree by >=8 spots - exactly the Concepcion/Lemon shape) improved for all three (RB +0.08 n=98,
+WR +0.03 n=158, TE +0.10 n=69) - real signal concentrated exactly where it's supposed to be, not an artifact
+of pooling.
+
+`project_rookies` reworked to match: renames gsis_id->player_id EARLY now (previously done only at the very
+end) so the current draft class's own row-level preseason_ecr_log can be merged in before applying the curve,
+via a new `_with_display_name_fallback` helper (draft_picks-derived tables carry `pfr_player_name`, not
+`player_display_name` - compute_preseason_market_rank's crosswalk needs the latter, fallback only where
+missing). `compute_rookie_walk_forward_residuals` (feeds the Monte Carlo rookie residual pool) updated to
+match - caught and fixed a real duplicate-column bug while wiring this in: it called `fit_rookie_curve`
+(which does its own internal ECR merge) on `train`, but had ALSO pre-merged the same ECR data onto the full
+table before the loop - two merges of the same column collide into `_x`/`_y` suffixes. Fixed by only merging
+onto `test` outside the function, letting `fit_rookie_curve` handle `train`'s own merge internally.
+
+Verified on the real board: Concepcion (CLE, pick 24) ppg_pred 7.04->7.75, VBD -34.87->-25.76; Lemon (PHI,
+pick 20) ppg_pred 5.83->6.35, VBD -47.18->-40.22; Stribling (SF, pick 33) ppg_pred 4.90->5.42, VBD
+-61.02 (after both fixes, from an original -51.07 before either); Tate (TEN, pick ~10) VBD 44.42->55.94 -
+real, meaningful, market-informed movement for every real rookie WR on the board, not name-targeted patches.
+RB sanity check (Love/Price, the case this whole rookie-curve architecture was originally built around)
+unaffected as expected - Love stays RB1-tier, Price stays near replacement. Golden (GB) barely moved from
+today's earlier veteran-model fix alone, since he's a 2nd-year player on the VETERAN path, not the rookie
+curve - his suppression is the role-security issue below, not something this fix touches.
+
+**Found, but NOT fixed - a real, large, league-wide role-security miscalibration, flagged for a dedicated
+future investigation.** All three flagged WRs (Golden, Lemon, Stribling) share an identical signature on the
+CURRENT live depth chart (`current_depth_chart.parquet`): `pos_rank=3`, `pos_slot=8`. Checked what that slot
+means across the WHOLE league (every team's `pos_slot=8`/`pos_rank=3` player) and it's consistently the
+**starting slot receiver** - a real starter in a true 3-WR-starter offense, not genuine bench depth. The
+naive `apply_role_security_discount` WR gate (`depth_chart_rank>=3`, 0.78x) can't tell "3rd starter in a
+3-starter system" apart from "genuine 3rd-stringer," because `pos_rank` is just a flattened 1-7 enumeration
+across THREE separate depth tracks (X/Z/slot, each with its own starter+backup), not a true "how good is this
+player" ladder. Scope check: **32 players league-wide currently show this exact pattern** (one on almost
+every team), including real, established starters - Cooper Kupp, Keenan Allen, Calvin Ridley, Jakobi Meyers,
+Jauan Jennings - all getting the same discount as an actual bench player. Cross-checked Golden's real-world
+role via web search: Jordan Love named him the starting X receiver for 2026 ("locked in... expecting big
+things"), directly contradicting the bench-tier treatment the naive rank implies.
+
+**Why this wasn't fixed today, deliberately**: the HISTORICAL depth chart source used to originally calibrate
+the 0.78x WR discount (`nfl.load_depth_charts()`, week-1/2 snapshots) has a fundamentally CRUDER schema than
+the current live pull - `depth_team` (starter=1/backup=2, with multiple players legitimately TIED at
+depth_team=1 for a 3-WR set) and `formation`, not the current live pull's `pos_slot`/`pos_rank`. There is no
+clean, already-available way to reproduce the same X/Z/slot distinction historically without real additional
+engineering (and it's not obvious the tie structure even supports cleanly identifying WHICH of the tied
+players is specifically "the slot guy" retroactively). Shipping a refined gate without walk-forward validating
+it against real historical outcomes would repeat exactly the kind of mistake this project has caught and
+reverted before (the age x elite interaction, the QB streaming multiplier) - a plausible-sounding, real-looking
+pattern that still needs to earn its place with real evidence, not just a compelling live-data anecdote.
+Flagged here as the clear next priority, with a concrete starting point: reconstruct an equivalent "tied at
+the top depth_team, not real bench" signal from the historical schema (treating ALL players sharing the
+top depth_team as real starters regardless of how many, rather than an artificial 1/2/3 ladder) and re-run
+the SAME contemporaneous week-1/2-vs-real-outcomes test `apply_role_security_discount`'s docstring already
+documents, split by whether that reproduces a materially different (smaller) bias for the "tied-starter"
+population than genuine depth_team>=2 bench players.
+
+Regenerated both scoring formats' boards, both composite boards, and `board_data.json`; republished the same
+Artifact URL.
+
