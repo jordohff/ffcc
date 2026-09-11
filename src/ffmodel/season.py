@@ -3705,6 +3705,30 @@ MANUAL_STATUS_OVERRIDES: dict[str, dict] = {
         "note": "Placed on NFL Commissioner's Exempt List 8/30/26 (pending misdemeanor charges) - "
         "barred from team activity, no return timeline. Manual override, not calibrated to precedent.",
     },
+    # Ricky Pearsall (SF WR) and Jayden Higgins (HOU WR) - both confirmed,
+    # unambiguous SEASON-ENDING injuries (Pearsall: PCL surgery, placed on
+    # IR 8/1/26, 6-12 month recovery pointing to spring 2027; Higgins: torn
+    # ACL in an 8/26 joint practice, per ESPN/NFL Network same-week
+    # reporting) - real, current, verified 2026-09-11. Both already show
+    # `status == "RES"` on the board (that part of the pipeline correctly
+    # caught the roster designation), but the GBM durability model was
+    # still predicting a normal games_est (12-14 games) for both, since
+    # nothing in its feature set knows "this specific player is confirmed
+    # out for the entire remaining season" - a real gap distinct from every
+    # other durability correction in this pipeline, all of which predict
+    # from PATTERNS, not a single confirmed real-world fact. games_est set
+    # to 0 (not a placeholder like Jacobs' - there is no realistic in-season
+    # return here, unlike a legal case that could resolve).
+    "00-0039916": {
+        "games_est": 0.0,
+        "note": "Season-ending PCL surgery, placed on IR 8/1/26 - 6-12 month recovery (spring 2027). "
+        "Manual override: real, confirmed absence for the entire 2026 season.",
+    },
+    "00-0040130": {
+        "games_est": 0.0,
+        "note": "Torn ACL in 8/26/26 joint practice, out for the 2026 season (ESPN/NFL Network). "
+        "Manual override: real, confirmed absence for the entire 2026 season.",
+    },
 }
 """Hand-maintained, dated overrides for real-world events that broke too
 recently for any of this project's periodic data pulls to reflect yet

@@ -30,10 +30,23 @@ real weekly residual variance barely moves across matchup_factor quartiles
 at any position, so bucketing by matchup would add complexity the data
 doesn't support (see that function's own docstring for the full test).
 
+Real games within one "week" don't all kick off at once (Wed/Thu openers,
+a full Sunday slate, a Monday closer) - a game already played needs the
+bias-free historical reconstruction, but a game still days away can (and
+should) use the freshest live data available, since using stale data there
+would just be needlessly worse for no bias-avoidance benefit. --played-teams
++ --historical-board-csv handle exactly this split: the (fresh, default)
+board is the base, and any team listed in --played-teams gets its players'
+rows swapped in from --historical-board-csv instead (matched by player_id).
+
 Usage:
     uv run scripts/build_weekly_projections.py --week 2
     uv run scripts/build_weekly_projections.py --week 1 --board-csv path/to/prekickoff_board.csv \
         --note "reconstructed from the last pre-kickoff data pull (2026-09-04), not a literal snapshot"
+    uv run scripts/build_weekly_projections.py --week 1 \
+        --played-teams NE,SEA,SF,LA --historical-board-csv path/to/prekickoff_board.csv \
+        --note "hybrid: NE/SEA/SF/LA (already played) use the 2026-09-04 pre-kickoff snapshot; \
+every other team uses live data as of lock time (games not yet played)"
 """
 
 import argparse
@@ -49,6 +62,7 @@ from ffmodel.features import compute_routes_run
 from ffmodel.season import (
     aggregate_healthy_season_stats,
     aggregate_season_stats,
+    apply_manual_status_overrides,
     build_enriched_weekly,
     build_season_training_table,
     build_weekly_matchups,
@@ -64,6 +78,21 @@ RAW_DIR = ROOT / "data" / "raw"
 DRAFT_DIR = ROOT / "output" / "draft_rankings"
 LOCK_DIR = ROOT / "data" / "weekly_locks"
 
+# Real, verified news (via web search, not yet reflected in Sleeper's live
+# feed as of lock time) that a specific player will NOT play a SPECIFIC
+# upcoming week - distinct from MANUAL_STATUS_OVERRIDES in season.py, which
+# is for a real SEASON-LONG absence. This only zeroes the one (player_id,
+# week) pair listed, via the same WEEKLY_DEFINITE_OUT_STATUSES check
+# project_weekly_points already does for a real current_injury_status - it
+# does not touch the player's season-long board ranking at all, since a
+# short absence shouldn't move their full-season total_points_pred/VBD.
+# Remove an entry once Sleeper's own feed catches up and reflects it.
+MANUAL_WEEKLY_OUT: dict[tuple[str, int], str] = {
+    ("00-0039338", 1): "Brock Bowers (LV TE) - meniscus trim 9/9/26, officially listed as a non-"
+    "participant on LV's Week 1 injury report, expected to miss the LV@MIA game 9/13. Not yet "
+    "reflected in Sleeper's live feed as of lock time (2026-09-11).",
+}
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -73,7 +102,19 @@ def main() -> None:
     parser.add_argument(
         "--board-csv", type=str, default=None,
         help="Override board CSV path (e.g. a saved pre-kickoff snapshot). Defaults to the "
-             "current output/draft_rankings/draft_rankings_{season}_{scoring}.csv for each format.",
+             "current output/draft_rankings/draft_rankings_{season}_{scoring}.csv for each format. "
+             "This is the BASE board - see --played-teams/--historical-board-csv for a hybrid.",
+    )
+    parser.add_argument(
+        "--played-teams", type=str, default=None,
+        help="Comma-separated team codes whose game for this week has ALREADY been played (e.g. "
+             "NE,SEA,SF,LA). Those teams' players' rows are swapped in from --historical-board-csv "
+             "instead of the base board, so an already-decided game stays bias-free while a still-"
+             "upcoming one gets the freshest live data. Requires --historical-board-csv.",
+    )
+    parser.add_argument(
+        "--historical-board-csv", type=str, default=None,
+        help="Pre-kickoff board snapshot to source --played-teams' players from.",
     )
     parser.add_argument(
         "--note", type=str, default="",
@@ -83,6 +124,9 @@ def main() -> None:
     )
     parser.add_argument("--n-sims", type=int, default=10000)
     args = parser.parse_args()
+    if args.played_teams and not args.historical_board_csv:
+        parser.error("--played-teams requires --historical-board-csv")
+    played_teams = set(t.strip() for t in args.played_teams.split(",")) if args.played_teams else set()
 
     weekly = pd.read_parquet(RAW_DIR / "weekly_stats.parquet")
     pbp = pd.read_parquet(RAW_DIR / "pbp_dropbacks.parquet")
@@ -104,6 +148,36 @@ def main() -> None:
     for scoring in scorings:
         board_path = Path(args.board_csv) if args.board_csv else DRAFT_DIR / f"draft_rankings_{args.season}_{scoring}.csv"
         board = pd.read_csv(board_path)
+
+        if played_teams:
+            historical_path = Path(args.historical_board_csv)
+            historical = pd.read_csv(historical_path)
+            swap_ids = set(historical.loc[historical["team"].isin(played_teams), "player_id"].dropna())
+            n_swapped = int(board["player_id"].isin(swap_ids).sum())
+            board = board[~board["player_id"].isin(swap_ids)]
+            board = pd.concat([board, historical[historical["player_id"].isin(swap_ids)]], ignore_index=True)
+            print(f"{scoring}: hybrid board - swapped {n_swapped} players on {sorted(played_teams)} "
+                  f"in from {historical_path.name} (already played); everyone else uses {board_path.name}")
+
+        # Re-applying CURRENT MANUAL_STATUS_OVERRIDES here (idempotent for
+        # rows that already have them from a fresh pipeline run) matters
+        # specifically for rows swapped in from an OLDER snapshot, which was
+        # built by whatever season.py code existed at snapshot time - it can
+        # be missing an override added since (e.g. Ricky Pearsall's real Aug
+        # 1 IR placement, which predates even the 9/4 snapshot but wasn't
+        # coded as an override until 9/11). This isn't hindsight: these are
+        # real facts already true before ANY of this week's games were
+        # played, just not yet reflected in the pipeline at snapshot time.
+        board = apply_manual_status_overrides(board)
+
+        board = board.copy()
+        for (player_id, wk), note in MANUAL_WEEKLY_OUT.items():
+            if wk != args.week:
+                continue
+            mask = board["player_id"] == player_id
+            if mask.any():
+                board.loc[mask, "current_injury_status"] = "Out"
+                print(f"{scoring}: applied manual weekly-out for {player_id} (week {wk}): {note}")
 
         enriched = build_enriched_weekly(weekly, routes, ngs, scoring=scoring)
         defense_strength = compute_defense_strength(enriched)
@@ -130,7 +204,10 @@ def main() -> None:
         week_board["scoring"] = scoring
         week_board["locked_at"] = locked_at
         week_board["source_note"] = args.note
-        week_board["source_board"] = str(board_path)
+        source_board_desc = str(board_path)
+        if played_teams:
+            source_board_desc += f" (base) + {args.historical_board_csv} for {sorted(played_teams)}"
+        week_board["source_board"] = source_board_desc
 
         cols = [
             "season", "week", "player_id", "player_display_name", "position", "team", "opponent",

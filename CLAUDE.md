@@ -5078,3 +5078,72 @@ no matchup conditioning, because the data didn't support anything fancier), thre
 hypotheses rejected with evidence rather than assumed either way. All four investigations used real
 historical data before any code was written, matching this project's standing discipline throughout.
 
+
+
+### 2026-09-11 (cont'd) - implied-team-total tested at weekly grain (null, worse on validation); real
+kickoff-time scheduling gap found and fixed; two real season-ending injuries caught and overridden
+
+User asked to (1) test implied team total (real Vegas spread/total, not a season average) as a weekly
+signal, and (2) look at Kenneth Walker III's Week 1 number specifically.
+
+**Kenneth Walker check surfaced a real scheduling assumption error, not a model bug.** His Week 1 number
+(9.89 PPR, RB31, tough 0.77 matchup at Denver) checked out fine on its own - Denver really is last season's
+#2 run defense (91.1 yds/game allowed), confirmed via web search. But verifying his game's actual date
+surfaced something bigger: **KC@DEN is Monday Night Football, 9/14 - not yet played as of this session
+(9/11)**. Pulled the real full Week 1 schedule and found only 2 of 16 games (NE@SEA Wed 9/9, SF@LA Thu 9/10)
+had actually been played - the other 14 (13 on Sunday 9/13, 1 on Monday 9/14) were still upcoming. The
+existing Week 1 lock had been treating the WHOLE week as "already happened" and using one uniform stale
+(9/4) pre-kickoff snapshot for every game - unnecessarily conservative for the 14 not-yet-played games, which
+could legitimately use the freshest live data without any hindsight-bias risk at all (they hadn't happened
+yet).
+
+**Shipped a real kickoff-time split, not just a one-off patch.** `build_weekly_projections.py` now takes
+`--played-teams` + `--historical-board-csv`: the (fresh, default) board is the base, and only the teams whose
+game has ALREADY happened get their rows swapped in from a saved historical snapshot instead. Re-locked Week
+1 as a hybrid: NE/SEA/SF/LA (83 players) from the 9/4 pre-kickoff snapshot, everyone else (28 teams) from
+today's live data.
+
+**Real, current pre-game injury news found via web search (not in-game - the user specifically asked to
+distinguish these) for three players, all in not-yet-played games:**
+- **Brock Bowers** (LV TE, LV@MIA is Sunday 9/13) - meniscus trim 9/9, officially a non-participant on LV's
+  own Week 1 injury report (ESPN/NFL Network/the Raiders' own site all confirm), expected to miss "a game or
+  two." A short, WEEK-SPECIFIC absence, not season-long - the right mechanism is a per-week override, not a
+  season-level one. Added `MANUAL_WEEKLY_OUT` (build_weekly_projections.py) - a (player_id, week) -> note dict,
+  distinct from season.py's MANUAL_STATUS_OVERRIDES, that patches `current_injury_status` to "Out" for exactly
+  that one locked week (checked by project_weekly_points' existing WEEKLY_DEFINITE_OUT_STATUSES logic) without
+  touching his season-long board ranking at all.
+- **Ricky Pearsall** (SF WR) and **Jayden Higgins** (HOU WR) - both real, confirmed SEASON-ENDING injuries
+  (Pearsall: PCL surgery, placed on IR 8/1/26, 6-12 month recovery pointing to spring 2027; Higgins: torn ACL
+  in an 8/26 joint practice, per ESPN/NFL Network). Both already showed `status=="RES"` on the board (correct)
+  but the GBM durability model was still predicting a normal games_est (12-14 games) for both, since nothing
+  in its feature set knows "this specific player is confirmed out for the entire remaining season" - that's a
+  single real-world fact, not a learnable pattern. Added both to `MANUAL_STATUS_OVERRIDES` (season.py,
+  games_est=0.0 - unlike Jacobs' placeholder, there's no realistic in-season return here).
+
+**Real bug caught and fixed while wiring the hybrid lock together, not shipped broken**: a player swapped in
+from the OLDER historical snapshot was built by whatever season.py code existed AT SNAPSHOT TIME - so
+Pearsall's row (his game already happened, SF@LA Thu 9/10, so he came from the 9/4 snapshot) came back with a
+real nonzero Week 1 number (7.2 pts) even after adding the override above, since the 9/4 snapshot predates
+the override existing in code at all. This is NOT a hindsight problem (Pearsall's Aug 1 IR placement was real
+and public well before 9/4), so re-applying the CURRENT `apply_manual_status_overrides` to the assembled
+hybrid board (regardless of which source board a row came from) is the correct fix, not a bias risk - verified
+Pearsall/Higgins/Bowers all correctly zero out after this fix.
+
+**Implied team total (real Vegas spread/total for that SPECIFIC week, not a season average) - tested properly
+at the weekly grain, a clean null that's actually slightly harmful once validated.** This project tested
+`implied_team_total` once before (2026-08-09) but only as a season-level feature, where it showed "no
+change" - untested until now at the grain where it should matter most (a specific week's real line). Built
+real per-team-game implied totals from schedules' own `spread_line`/`total_line` (2019-2025, genuine
+historical lines, not derived from results) and tested against real walk-forward weekly residuals (the
+already-corrected `ppg_pred * matchup_factor` formula). Same-game correlation is real but tiny for RB/WR/TE
+(r=0.036-0.051, p<0.001; QB r=-0.006, not significant) - and the DECISIVE test (calibrate on 2019-2022,
+validate on 2023-2025, out-of-sample MAE) shows adding it as a linear correction makes MAE WORSE at every
+single position (QB 6.80->6.86, RB 4.70->4.77, WR 4.35->4.39, TE 3.25->3.27) - the same-sample correlation
+didn't survive a genuine holdout, a classic overfitting-to-noise pattern this project has caught many times
+before. Not shipped - confirms and extends the 2026-08-09 finding rather than contradicting it.
+
+Regenerated both boards, both composite boards, board_data.json, and republished the Weekly Rankings page
+with the corrected Week 1 lock (Bowers/Pearsall/Higgins all now show 0, Walker's real number is unaffected
+and unchanged at 9.89). Backtest headline numbers unchanged throughout (all board-build-time fixes, not
+training-time changes).
+
