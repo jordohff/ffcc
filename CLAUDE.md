@@ -5219,3 +5219,22 @@ posture (skip and report rather than guess) is the mitigation, not a guarantee. 
 routine can be switched to "do the work, hold for approval" instead if this ever feels too hands-off in
 practice - not done today since the user explicitly chose full automation.
 
+
+
+### 2026-09-11 (cont'd) - Weekly Rankings set as the default page; lock note moved to the footer
+
+Two small artifact UX changes, requested directly: (1) Weekly Rankings (not Draft Board) is now what loads
+first when the page opens - swapped which `<div class="page">` starts `hidden` and which page-tab starts
+`active`, no JS logic changes needed since page visibility was already driven purely by the `hidden`
+attribute. (2) The per-week provenance note (e.g. the "Hybrid lock: NE/SEA/SF/LA already played..." text) no
+longer sits under the week-selector controls - it now lives in the footer, labeled "This week's lock note:",
+still updating per selected week via the same `#weekNote` element id (only its position in the markup
+changed, `renderWeekSelect()` needed no edits).
+
+While moving it, also fixed a real, stale inconsistency in that same footer: its formula description still
+read `ppg_pred × matchup_factor × (games_est ÷ 17)`, describing the OLD discount this session already
+removed earlier today - updated to the current `ppg_pred × matchup_factor` formula and the definite-out
+zeroing behavior, and removed the now-unused `.week-note` CSS rule. Verified via the jsdom suite (33/33,
+updated for the new default-page assertions) and a real-browser check (footer note renders correctly at the
+bottom, Weekly Rankings loads by default) before publishing.
+
