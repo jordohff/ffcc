@@ -5147,3 +5147,75 @@ with the corrected Week 1 lock (Bowers/Pearsall/Higgins all now show 0, Walker's
 and unchanged at 9.89). Backtest headline numbers unchanged throughout (all board-build-time fixes, not
 training-time changes).
 
+
+
+### 2026-09-11 (cont'd) - weekly refresh automated: GitHub remote created, scheduled cloud routine ships
+the artifact every Tuesday with no manual step
+
+User asked for the weekly artifact refresh (previously a manual "run the pipeline, verify, publish" sequence
+each week) to happen automatically - "week 1 is done monday night, refresh week 2 projections tuesday
+morning" without having to ask for it each time.
+
+**Real infrastructure constraint discovered, not assumed**: a Claude Code scheduled cloud routine runs in an
+isolated sandbox with NO access to this machine's local files - it can only work from a git clone. This
+project had no GitHub remote before today. Also ruled out `CronCreate` (session-only, dies with this
+conversation, 7-day hard cap regardless) as genuinely durable automation for a full NFL season - only a cloud
+routine (`RemoteTrigger`/the `schedule` skill) persists independently.
+
+**Pushed to a new repo**: `gh` CLI isn't installed on this machine, so the user created
+`https://github.com/jordohff/ffcc` by hand on github.com and this session added it as `origin` and pushed
+(Git Credential Manager, already configured globally, handled auth with no prompt needed). **Real, repeated
+friction getting the cloud routine access to it** - two rounds of "connect GitHub"/403 "no repo access"
+errors, tried and failed: (1) github.com/settings/installations showed no installed app to configure, only
+an "Authorized GitHub Apps" entry (OAuth-level authorization, not the same as an app INSTALLATION with real
+per-repo access control); (2) starting a routine directly from claude.ai/code/routines' own repo-picker also
+couldn't find the repo. **What actually worked: making the repo public.** A public repo doesn't need the
+per-repo installation grant that was the whole blocker - the routine created successfully on the very next
+attempt with no other change. Net effect: `ffcc` is now public (confirmed no secrets are committed - all
+data is re-pulled fresh by the pipeline itself, nothing sensitive ever lived in the repo).
+
+**Built `scripts/build_weekly_artifact_patch.py` specifically for the cloud environment**, tested in this
+session before trusting it in an unattended context: `data/paid/` (FantasyPoints, Coachspeak, the hand-
+compiled consensus-rankings CSVs) is gitignored - licensed third-party data this project has never
+redistributed even into a private clone, so a fresh cloud checkout will NEVER have it. That means
+`build_composite_board.py`/`build_board_artifact_data.py` (both need it) cannot run in that environment.
+The new script sidesteps this by reading the CURRENTLY PUBLISHED artifact's board_data.json (via `Artifact
+action:"read"`) and patching ONLY the `weekly`/`weekly_meta` keys with a freshly-locked week, leaving
+`half_ppr`/`ppr`/`replacement`/`generated_at` (the composite-dependent main board) exactly as a human
+session last published them. Verified end to end this session: ran it against the real, current
+board_data.json and confirmed the main board's row count/replacement constants/generated_at were byte-
+identical while the weekly section refreshed correctly.
+
+**Shipped a real routine** (`trig_01UBH5nGYoBnkhFetPGXnZ5g`, "FF weekly projections refresh"), cron `7 13 * *
+2` (Tuesday ~8:07am America/Chicago, an off-the-hour minute deliberately - first fire 2026-09-15), Sonnet 5,
+tools Bash/Read/Write/Edit/Glob/Grep/Artifact/WebSearch. The prompt (fully self-contained, since a cloud
+routine starts with zero conversation context) encodes the same real discipline this project has followed
+manually all session:
+- Determines the target week FROM THE SCHEDULE (min/max `gameday` per week in schedules.parquet vs. what's
+  already locked under data/weekly_locks/), not just "last locked + 1" - self-correcting if a run is ever
+  missed, and explicitly told to proceed honestly (noting it in the lock's own --note) rather than block if
+  it ever finds itself catching up on a week that's already partly underway.
+- Sanity-checks the rebuilt backtest numbers before trusting them (stop and report rather than publish if a
+  position's Spearman craters - a real regression signal, not a real week-to-week swing).
+- Runs a SMALL, conservative, sourced real-news check (the same bar established manually this session for
+  Bowers/Pearsall/Higgins: only act on multi-source or official-injury-report confirmation of a season-ending
+  or definite this-week absence; explicitly told to leave Questionable/Doubtful/rumor-tier signals alone) and
+  applies MANUAL_STATUS_OVERRIDES (season-long) or MANUAL_WEEKLY_OUT (single-week) using the exact same
+  mechanisms and file locations already shipped in code today, rather than inventing a new one.
+- Uses the marker-based, assert-before-and-after HTML splice procedure this project has relied on since the
+  2026-09-04 data-splice bug (verify the `<script id="board-data"` marker count and the literal footer text
+  survive the edit; stop rather than publish if either check fails) - given directly in the prompt rather than
+  left to the fresh agent to reinvent (or worse, re-discover the same bug that already bit this project once).
+- Commits and pushes the new lock files (and any override edits) back to `origin master`, but treats a push
+  failure as non-fatal to the run - the live artifact publish is the part that actually matters to the user
+  day to day.
+
+**Explicit tradeoff, stated plainly to the user rather than glossed over**: this runs and publishes with NO
+human review, per the user's own choice when asked. That means the routine could, in principle, publish
+something wrong in a week where a genuinely novel situation doesn't fit any of the guardrails written into
+its prompt - the same category of real issue this session repeatedly caught by hand (the Wednesday-vs-Monday
+kickoff-timing gap, Sleeper's live feed lagging a real meniscus surgery). The prompt's conservative-by-default
+posture (skip and report rather than guess) is the mitigation, not a guarantee. Flagged to the user that the
+routine can be switched to "do the work, hold for approval" instead if this ever feels too hands-off in
+practice - not done today since the user explicitly chose full automation.
+
