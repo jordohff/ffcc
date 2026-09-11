@@ -948,6 +948,20 @@ def build_weekly_matchups(schedules: pd.DataFrame, season: int) -> pd.DataFrame:
     return pd.concat([home, away], ignore_index=True)
 
 
+# Real, currently-known statuses (2026-09-11 snapshot) that mean a player
+# cannot suit up for their NEXT game specifically - not "elevated risk
+# sometime this season" (that's what games_est already captures at the
+# SEASON level), a concrete, contemporaneous "will not play this game"
+# signal. Only IR/Out have been observed on a real board so far; PUP/NFI/
+# Suspended/Exempt/Doubtful are included pre-emptively since they carry the
+# same real meaning and could appear on a future week's live pull.
+# "Questionable" is deliberately NOT included - it does not reliably mean a
+# missed game (see flag_injury_affected_weeks elsewhere in this file), and
+# real competitor sites don't zero a Questionable player's weekly number
+# either.
+WEEKLY_DEFINITE_OUT_STATUSES = {"Out", "IR", "PUP", "NFI", "Suspended", "Exempt", "Doubtful"}
+
+
 def project_weekly_points(
     board: pd.DataFrame, weekly_matchups: pd.DataFrame, defense_strength: pd.DataFrame, target_season: int
 ) -> pd.DataFrame:
@@ -958,31 +972,54 @@ def project_weekly_points(
 
     Deliberately does NOT re-predict each week from scratch (that would be
     a much bigger, separately-validated model). Instead it redistributes
-    the ALREADY-validated season total: `weekly_points = ppg_pred *
-    matchup_factor * (games_est / 17)`, where `matchup_factor` is that
-    week's opponent's points-allowed-per-game at the player's position
-    (from the most recent completed season - `target_season` itself hasn't
-    happened yet, same leak-safe convention as
-    compute_strength_of_schedule) divided by the LEAGUE-AVERAGE points
-    allowed to that position that same season. A factor of 1.0 means a
-    perfectly average matchup that week; >1 means an easier-than-average
-    matchup (weaker defense); <1 means tougher. Bye weeks get an explicit
-    0. The `games_est / 17` term is essential, not optional: `ppg_pred` is
-    a rate (points PER GAME PLAYED), and games_est already reflects that
-    plenty of players aren't expected to suit up every single week (bench
-    depth, injury-prone players, a rookie buried on a depth chart) -
-    applying the raw per-game rate to all 17 non-bye weeks silently assumed
-    every player plays every game, which is exactly wrong for anyone with
-    games_est well below 17 (caught this from a deep-bench rookie QB whose
-    weekly sum came out 10x his real season total before this fix - a
-    games_est of ~2 applied at full rate across 17 weeks). There's no
-    signal for WHICH specific weeks a player sits, so the discount is
-    spread evenly across the whole schedule rather than guessed at.
+    the ALREADY-validated season rate: `weekly_points = ppg_pred *
+    matchup_factor`, where `matchup_factor` is that week's opponent's
+    points-allowed-per-game at the player's position (from the most recent
+    completed season - `target_season` itself hasn't happened yet, same
+    leak-safe convention as compute_strength_of_schedule) divided by the
+    LEAGUE-AVERAGE points allowed to that position that same season. A
+    factor of 1.0 means a perfectly average matchup that week; >1 means an
+    easier-than-average matchup (weaker defense); <1 means tougher. Bye
+    weeks, and any week where the player carries a real, currently-known
+    "will not play this game" status (see WEEKLY_DEFINITE_OUT_STATUSES) or
+    an active manual status override, get an explicit 0.
+
+    Does NOT multiply by games_est/17 (a real, deliberate change from this
+    function's original design - see the 2026-09-11 CLAUDE.md entry for the
+    full walk-forward evidence). That original design conflated two
+    different questions: games_est is a SEASON-level durability estimate
+    (how many of 17 games this player is likely to appear in, spread evenly
+    because there's no signal for WHICH specific weeks) - applying that same
+    season-average discount to EVERY SINGLE upcoming week systematically
+    under-predicted real single-game output. Walk-forward tested against
+    real historical weekly actuals (2019-2025, ~33k player-weeks the player
+    actually suited up for): the season-average discount produced a real,
+    large, position-general bias (pooled -2.02 ppg; QB -4.84, RB -2.26, WR
+    -1.44, TE -1.35) while assuming the player plays (no discount) is
+    close to unbiased at every position (pooled -0.08; QB -0.89, RB -0.18,
+    WR +0.17, TE 0.00) - QB even improves on raw MAE too (6.73 vs 7.58).
+    RB/WR/TE take a small MAE cost from dropping the discount (worse by
+    ~0.05-0.85 ppg depending on position) - a real, honestly-reported
+    trade-off, not a strict win on every metric - but the bias fix is what
+    actually matters for a single week's point estimate (an unbiased
+    number that's occasionally off in either direction beats a number
+    that's reliably low), and it directly resolves the same conflation
+    this function's own now-superseded original docstring reasoned through
+    (a season-level "how many games total" signal doesn't tell you whether
+    THIS SPECIFIC upcoming game is one of the ones they'll miss - and for
+    the one case where we DO know that with real confidence, a
+    contemporaneous injury/exempt status, that's now checked directly).
     Matchup factors are NOT renormalized to force an exact reconciliation
     with the season's total_points_pred - real schedules aren't perfectly
     balanced (a team's bye and its specific 17 opponents are what they
-    are), so a small residual drift between the weekly sum and the season
-    total is expected and correct, not a bug to paper over.
+    are), so drift between the weekly sum and the season total is expected.
+
+    Needs `current_injury_status` and `manual_override_note` on `board` (both
+    already-existing board columns) to apply the definite-out zeroing -
+    reflects whatever was live at LOCK time, which is exactly the
+    per-week-specific signal this needs (this function is meant to be
+    called once per week, right before that week's games - see
+    build_weekly_projections.py).
 
     Drops any board row with a null player_id before building the weekly
     schedule - a handful of very-late-round/UDFA rookies have no resolvable
@@ -992,7 +1029,11 @@ def project_weekly_points(
     players (the same class of bug already fixed once for the depth-chart
     merge in build_draft_rankings.py).
     """
-    board = board.dropna(subset=["player_id"])
+    board = board.dropna(subset=["player_id"]).copy()
+    if "current_injury_status" not in board.columns:
+        board["current_injury_status"] = None
+    if "manual_override_note" not in board.columns:
+        board["manual_override_note"] = None
 
     league_avg = defense_strength.groupby(["season", "position"])["pts_allowed_pg"].mean().reset_index(
         name="league_avg_pts_allowed_pg"
@@ -1008,8 +1049,9 @@ def project_weekly_points(
     )
 
     weeks = pd.DataFrame({"week": weekly_matchups["week"].unique()})
-    n_weeks = len(weeks)
-    schedule = board[["player_id", "team", "position", "ppg_pred", "games_est"]].merge(weeks, how="cross")
+    schedule = board[
+        ["player_id", "team", "position", "ppg_pred", "current_injury_status", "manual_override_note"]
+    ].merge(weeks, how="cross")
     schedule = schedule.merge(weekly_matchups, on=["team", "week"], how="left")
 
     schedule = schedule.merge(
@@ -1017,9 +1059,12 @@ def project_weekly_points(
     )
     schedule["matchup_factor"] = schedule["matchup_factor"].fillna(1.0)
     schedule["is_bye"] = schedule["opponent"].isna()
-    availability = schedule["games_est"] / n_weeks
-    schedule["weekly_points_pred"] = (schedule["ppg_pred"] * schedule["matchup_factor"] * availability).where(
-        ~schedule["is_bye"], 0.0
+    definite_out = (
+        schedule["current_injury_status"].isin(WEEKLY_DEFINITE_OUT_STATUSES)
+        | schedule["manual_override_note"].notna()
+    )
+    schedule["weekly_points_pred"] = (schedule["ppg_pred"] * schedule["matchup_factor"]).where(
+        ~(schedule["is_bye"] | definite_out), 0.0
     )
     return schedule[["player_id", "week", "opponent", "is_bye", "matchup_factor", "weekly_points_pred"]]
 

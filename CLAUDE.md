@@ -4947,3 +4947,66 @@ accuracy); the other piece (QB-drags-catchers) was tested honestly and correctly
 the real signal turned out to be. `simulate_season_outcomes` (phase 1, single-player board view) is
 unaffected either way - this is scoped to roster-level simulation only, matching what was asked.
 
+
+
+### 2026-09-11 - weekly-projections page shipped; a real, large bias found and fixed in project_weekly_points
+
+Moved into the "weekly projections phase of the season" per the user's request - reconstructed real,
+bias-free Week 1 projections (using the last pre-kickoff data pull, 2026-09-04, since a same-day live
+refresh had already overwritten the raw data with post-Week-1 information - honestly caveated as NOT a
+literal Wed-6pm snapshot, the closest available one) and built durable infrastructure for this going
+forward: `scripts/build_weekly_projections.py` locks a week's opponent-adjusted projections into a
+COMMITTED csv (`data/weekly_locks/week{N}_2026_{scoring}.csv`) before that week's games are played -
+unlike everything else in this pipeline, a weekly projection can't be honestly regenerated after the fact
+(re-running later would silently bake in real hindsight: updated depth charts, in-game injuries). Also
+restructured the published Artifact into two pages under a real site-nav header (Draft Board / Weekly
+Rankings), reusing the existing split-table/frozen-column/sticky-offset mechanics rather than duplicating
+them - verified with a 24-assertion jsdom suite plus real-browser pixel checks (sticky offsets measured via
+getBoundingClientRect, page switching, sort/search/filter) before publishing.
+
+**User's follow-up, comparing against ESPN's own numbers, caught a real bug**: Jahmyr Gibbs projected at
+15.4 weekly points (PPR) vs. ESPN's implied ~21-22 ppg (369.07 season points / ~17 games). Diagnosed before
+assuming anything: the season-long `ppg_pred` (20.99) was actually already close to ESPN's own rate - the
+gap was entirely in `project_weekly_points`' redistribution formula, which multiplied every single week by
+`games_est / 17` (Gibbs: 13.97/17 = 0.82). That term was a SEASON-level durability discount (spread evenly
+across all 17 weeks because there's no signal for which specific weeks a player sits) being silently applied
+to a SINGLE upcoming week's point estimate too - conflating "how many games will this player miss somewhere
+this season" with "will he play THIS specific game," which are different questions once you're locking one
+week at a time right before it happens.
+
+**Walk-forward tested before shipping anything** (matching this project's standing discipline) - real
+historical weekly actuals, 2019-2025 (~33k player-weeks the player actually suited up for), comparing the
+current formula (`ppg_pred * matchup_factor * games_est/17`) against dropping the discount entirely
+(`ppg_pred * matchup_factor`, i.e. assume they play). Result: the discount produces a real, large,
+position-general NEGATIVE bias (pooled -2.02 ppg; QB -4.84, RB -2.26, WR -1.44, TE -1.35) - the model was
+systematically under-predicting real single-game output at every position, exactly matching the user's "too
+conservative" read. Dropping the discount is close to unbiased everywhere (pooled -0.08; QB -0.89, RB -0.18,
+WR +0.17, TE +0.00) and QB even improves on raw MAE too (6.73 vs 7.58). RB/WR/TE take a small, honestly-
+reported MAE cost from dropping the discount (worse by ~0.05-0.85 ppg depending on position, tested against
+a floor/sqrt/half-discount middle ground too - none beat "no discount" on bias while none beat "current" on
+MAE by enough to justify the added complexity) - a real bias-vs-MAE trade-off, not a clean win on every
+metric, but the bias is what directly explains the user's complaint and what matters for a single week's
+point estimate.
+
+**Shipped**: `project_weekly_points` no longer multiplies by `games_est/17` at all. Instead, added
+`WEEKLY_DEFINITE_OUT_STATUSES` (Out/IR/PUP/NFI/Suspended/Exempt/Doubtful) - a player carrying one of those
+CONTEMPORANEOUS statuses (from `current_injury_status`, real and live at lock time - exactly the per-week-
+specific signal the old season-average discount was crudely standing in for) or an active
+`manual_override_note` gets that week zeroed directly, instead of every player getting a fractional discount
+regardless of whether there's any real reason to expect them out. Bye weeks still zero as before. Re-locked
+Week 1 with the corrected formula, same pre-kickoff snapshot (so the bias-free property is unchanged) -
+Gibbs' PPR Week 1 number moved 15.37 -> 19.80, and the RB1 tier as a whole now reads as a real RB1 tier
+(Taylor 19.84, Gibbs 19.80, Achane 18.45, Barkley 18.40) instead of being uniformly suppressed.
+
+**Weekly Monte Carlo, scoped but not yet built** (user asked "are we considering a monte carlo sim" for the
+weekly page - currently there is none; the season-level sim only operates at the season grain). Real plan,
+built on the same walk-forward infrastructure already validated above: the residual pool for a weekly sim
+should be REAL SINGLE-WEEK prediction errors (actual - `ppg_pred * matchup_factor`, the now-corrected
+formula), not the season-level residual pool `simulate_season_outcomes` already uses - a season average
+smooths out week-to-week variance a single week doesn't have, so reusing the season pool would understate
+weekly boom/bust range. Same shape as the already-shipped season sim (10k draws, p10/p25/median/p75/p90,
+bust/boom probabilities) but at the player-week grain; a definite-out week doesn't need simulating (it's a
+deterministic 0). Worth checking whether the residual distribution should be conditioned on `matchup_factor`
+or `games_est` bucket (does a tougher matchup or a less secure role also mean more VARIANCE, not just a lower
+mean) before shipping - not tested yet, flagged as the next real step if the user wants to proceed.
+

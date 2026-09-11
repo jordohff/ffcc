@@ -21,6 +21,7 @@ from ffmodel.consensus import add_join_key
 from ffmodel.paid_data import _normalize_name
 
 BOARD_DIR = Path(__file__).resolve().parents[1] / "output" / "draft_rankings"
+WEEKLY_LOCK_DIR = Path(__file__).resolve().parents[1] / "data" / "weekly_locks"
 
 # Coachspeak quotes/coach-reliability columns dropped 2026-09-01 at the
 # user's request (no longer shown in the row-detail panel - only the
@@ -132,12 +133,46 @@ def build_replacement_constants(scoring: str) -> dict:
     return out
 
 
+WEEKLY_COLS = [
+    "week", "player_id", "player_display_name", "position", "team", "opponent",
+    "is_bye", "matchup_factor", "weekly_points_pred",
+]
+
+
+def build_weekly(scoring: str) -> tuple[list[dict], list[dict]]:
+    """Reads every locked data/weekly_locks/week{N}_2026_{scoring}.csv found
+    (see build_weekly_projections.py) - each one a real, committed,
+    point-in-time snapshot taken before that week's games, not something
+    this script itself computes. Returns (rows, week_meta): `rows` is every
+    player-week on the same schema the artifact's JS renders directly;
+    `week_meta` is one small entry per week (locked_at/note) for the page's
+    "as of" display, kept separate from the (much larger) per-row payload.
+    """
+    rows: list[dict] = []
+    meta: list[dict] = []
+    if not WEEKLY_LOCK_DIR.exists():
+        return rows, meta
+    for path in sorted(WEEKLY_LOCK_DIR.glob(f"week*_2026_{scoring}.csv")):
+        wk = pd.read_csv(path)
+        if wk.empty:
+            continue
+        rows.extend(json.loads(wk[WEEKLY_COLS].to_json(orient="records")))
+        meta.append({
+            "week": int(wk["week"].iloc[0]),
+            "locked_at": str(wk["locked_at"].iloc[0]),
+            "note": str(wk["source_note"].iloc[0]) if pd.notna(wk["source_note"].iloc[0]) else "",
+        })
+    return rows, meta
+
+
 def main() -> None:
     # Displayed in the artifact's masthead - reflects when this SCRIPT was
     # last run, i.e. when the embedded data was actually last regenerated,
     # not when the page was last published (those can differ if a
     # publish-only change, like a CSS fix, happens without new data).
     generated_at = datetime.now().strftime("%b %d, %Y, %I:%M %p")
+    weekly_half, weekly_half_meta = build_weekly("half_ppr")
+    weekly_ppr, weekly_ppr_meta = build_weekly("ppr")
     data = {
         "generated_at": generated_at,
         "half_ppr": build_one("half_ppr") + build_kdst_rows("half_ppr"),
@@ -146,11 +181,20 @@ def main() -> None:
             "half_ppr": build_replacement_constants("half_ppr"),
             "ppr": build_replacement_constants("ppr"),
         },
+        "weekly": {
+            "half_ppr": weekly_half,
+            "ppr": weekly_ppr,
+        },
+        "weekly_meta": {
+            "half_ppr": weekly_half_meta,
+            "ppr": weekly_ppr_meta,
+        },
     }
     out_path = BOARD_DIR / "board_data.json"
     out_path.write_text(json.dumps(data), encoding="utf-8")
     print(f"Wrote {out_path} ({out_path.stat().st_size / 1024:.0f} KB, "
-          f"{len(data['half_ppr'])} half_ppr / {len(data['ppr'])} ppr rows)")
+          f"{len(data['half_ppr'])} half_ppr / {len(data['ppr'])} ppr rows, "
+          f"{len(weekly_half)} half_ppr / {len(weekly_ppr)} ppr weekly rows)")
 
 
 if __name__ == "__main__":
