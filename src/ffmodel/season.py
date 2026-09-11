@@ -1069,6 +1069,161 @@ def project_weekly_points(
     return schedule[["player_id", "week", "opponent", "is_bye", "matchup_factor", "weekly_points_pred"]]
 
 
+def compute_weekly_walk_forward_residuals(
+    training_table: pd.DataFrame,
+    enriched_weekly: pd.DataFrame,
+    defense_strength: pd.DataFrame,
+    start_season: int = 2019,
+    end_season: int = 2026,
+) -> pd.DataFrame:
+    """Real historical (actual - predicted) errors for a SINGLE WEEK's point
+    estimate (`ppg_pred * matchup_factor`, the corrected formula - see
+    project_weekly_points), pooled by position - the raw material for
+    simulate_weekly_outcomes.
+
+    Deliberately a SEPARATE residual pool from compute_walk_forward_residuals
+    (the season-level one): a season average smooths out real week-to-week
+    variance a single game doesn't have, so reusing the season pool would
+    understate weekly boom/bust range.
+
+    Only pooled by POSITION, not further split by a matchup-difficulty
+    bucket (unlike the games_est bucketing _draw_simulated_totals uses) -
+    tested first, not assumed: real weekly residual std varies only
+    trivially across matchup_factor quartiles at every position (QB
+    7.95-8.45, RB 6.31-6.81, WR 5.70-6.11, TE 4.47-4.85 - noise-level
+    spread, and if anything slightly HIGHER in the easiest-matchup quartile
+    at every position, not the toughest), and correlating matchup extremity
+    with absolute residual gives r=0.02-0.05 (statistically detectable at
+    this sample size but practically negligible - under 0.3% of variance
+    explained). Bucketing by matchup difficulty would add real complexity
+    for no real gain, matching this project's standing discipline against
+    shipping a plausible-sounding conditioning variable the data doesn't
+    support (2026-09-11 investigation - also separately found and rejected,
+    same session: a defense-specific personnel-package weakness, e.g. "bad
+    vs 11 personnel," which showed real year-over-year persistence on its
+    own (r=0.22-0.29) but added ZERO incremental predictive value over the
+    existing matchup_factor once tested decisively, r=0.02 with the
+    existing model's own residual - a defense that looks personnel-
+    specific-weak is, once you dig in, just a defense that's generally weak
+    against that position, which matchup_factor already captures; and
+    real matchup difficulty was ALSO tested against snap-share reallocation
+    by position - r < 0.05 everywhere, no real game-script-driven volume
+    shift detected).
+
+    Only includes weeks the player actually has a real stat line (an actual
+    game played) - this is a RATE residual pool, not a play/no-play one
+    (project_weekly_points already handles play/no-play separately via
+    WEEKLY_DEFINITE_OUT_STATUSES).
+    """
+    league_avg = defense_strength.groupby(["season", "position"])["pts_allowed_pg"].mean().reset_index(
+        name="league_avg_pts_allowed_pg"
+    )
+    opponent_defense = defense_strength.rename(columns={"team": "opponent"})
+    opponent_defense = opponent_defense.merge(
+        league_avg, on=["season", "position"], how="left"
+    )
+    opponent_defense["matchup_factor"] = (
+        opponent_defense["pts_allowed_pg"] / opponent_defense["league_avg_pts_allowed_pg"]
+    )
+    opponent_defense_lagged = opponent_defense.assign(season=opponent_defense["season"] + 1)
+
+    real_weekly = enriched_weekly[enriched_weekly["season_type"] == "REG"][
+        ["player_id", "season", "week", "position", "opponent_team", "fantasy_points_target"]
+    ].rename(columns={"opponent_team": "opponent"})
+
+    results = []
+    for test_season in range(start_season, end_season):
+        train = training_table[training_table["season"] < test_season]
+        test = training_table[training_table["season"] == test_season].dropna(subset=["wavg_ppg"]).copy()
+        if train.empty or test.empty:
+            continue
+        models = fit_vet_models_by_position(train)
+        test["ppg_pred"] = predict_vet_ppg(models, test)
+
+        merged = real_weekly[real_weekly["season"] == test_season].merge(
+            test[["player_id", "position", "ppg_pred"]], on=["player_id", "position"], how="inner"
+        )
+        merged = merged.merge(
+            opponent_defense_lagged[opponent_defense_lagged["season"] == test_season][
+                ["opponent", "position", "matchup_factor"]
+            ],
+            on=["opponent", "position"], how="left",
+        )
+        merged["matchup_factor"] = merged["matchup_factor"].fillna(1.0)
+        merged["weekly_resid"] = merged["fantasy_points_target"] - (merged["ppg_pred"] * merged["matchup_factor"])
+        results.append(merged[["position", "weekly_resid"]])
+
+    if not results:
+        return pd.DataFrame(columns=["position", "weekly_resid"])
+    return pd.concat(results, ignore_index=True)
+
+
+def simulate_weekly_outcomes(
+    week_board: pd.DataFrame, weekly_residuals: pd.DataFrame, n_sims: int = 10000, seed: int = 42
+) -> pd.DataFrame:
+    """Monte Carlo single-week simulation - real single-week residuals (see
+    compute_weekly_walk_forward_residuals) resampled around each player's
+    own `weekly_points_pred` (already computed by project_weekly_points),
+    same reporting shape as simulate_season_outcomes (p10/p25/median/p75/
+    p90, bust/boom probabilities) but at the player-WEEK grain.
+
+    `week_board` must have `player_id`, `position`, `weekly_points_pred`,
+    `is_bye`. A definite-out or bye week (weekly_points_pred already forced
+    to 0 by project_weekly_points) is NOT simulated - it stays a
+    deterministic 0, since there's no real variance question left once we
+    already know they're not playing.
+
+    Floored at -2.0 (not 0) - real single-game fantasy weeks can go
+    slightly negative (a fumble-and-two-INT kind of week for a low-volume
+    player), matching the real observed range in the residual pool, unlike
+    a season TOTAL (simulate_season_outcomes floors at 0), which realistically
+    never goes negative once summed across a real number of games.
+
+    bust_prob/boom_prob bars are computed fresh from `week_board` itself
+    (that week's own real slate), matching simulate_season_outcomes'
+    dynamic-bar convention rather than a hardcoded number:
+    - sim_bust_prob: P(simulated points < 3.0) - a low, fixed bar (roughly
+      "did this pick contribute anything") rather than a replacement-level
+      concept, which doesn't translate cleanly to a single week.
+    - sim_boom_prob: P(simulated points >= that week's own top-10 average
+      at the position) - directly analogous to the season version.
+    """
+    rng = np.random.default_rng(seed)
+    n_players = len(week_board)
+    n_weeks_sim = n_sims
+    draws = np.zeros((n_players, n_weeks_sim))
+    positions = week_board["position"].to_numpy()
+    base = week_board["weekly_points_pred"].to_numpy()
+    simulate_mask = ~(week_board["is_bye"].to_numpy()) & (base != 0.0)
+
+    for position in pd.unique(positions):
+        pool = weekly_residuals.loc[weekly_residuals["position"] == position, "weekly_resid"].to_numpy()
+        row_mask = (positions == position) & simulate_mask
+        if not row_mask.any():
+            continue
+        if len(pool) < 20:
+            continue
+        idx = rng.integers(0, len(pool), size=(row_mask.sum(), n_weeks_sim))
+        draws[row_mask] = np.clip(base[row_mask][:, None] + pool[idx], -2.0, None)
+
+    # deterministic rows (bye / definite-out / no residual pool) just repeat their own point estimate
+    deterministic_mask = ~simulate_mask
+    draws[deterministic_mask] = base[deterministic_mask][:, None]
+
+    boom_by_pos = week_board.groupby("position")["weekly_points_pred"].apply(lambda s: s.nlargest(10).mean())
+    boom_bar = week_board["position"].map(boom_by_pos).fillna(np.inf).to_numpy()[:, None]
+
+    out = week_board[["player_id"]].copy()
+    out["sim_p10"] = np.percentile(draws, 10, axis=1)
+    out["sim_p25"] = np.percentile(draws, 25, axis=1)
+    out["sim_median"] = np.percentile(draws, 50, axis=1)
+    out["sim_p75"] = np.percentile(draws, 75, axis=1)
+    out["sim_p90"] = np.percentile(draws, 90, axis=1)
+    out["sim_bust_prob"] = (draws < 3.0).mean(axis=1)
+    out["sim_boom_prob"] = (draws >= boom_bar).mean(axis=1)
+    return out
+
+
 def add_head_coach_features(
     table: pd.DataFrame, coach_history: pd.DataFrame, team_output: pd.DataFrame
 ) -> pd.DataFrame:

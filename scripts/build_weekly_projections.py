@@ -21,6 +21,15 @@ projection is a stale/contaminated BOARD csv - which is exactly why
 --board-csv exists, to point at a specific point-in-time snapshot instead
 of always trusting whatever's currently on disk.
 
+Also runs a real Monte Carlo simulation per player-week (simulate_weekly_
+outcomes, season.py) - a SEPARATE residual pool from the season-level sim
+(compute_weekly_walk_forward_residuals), since a season average smooths out
+week-to-week variance a single game doesn't have. Only conditioned on
+position, not matchup difficulty - tested first (2026-09-11), not assumed:
+real weekly residual variance barely moves across matchup_factor quartiles
+at any position, so bucketing by matchup would add complexity the data
+doesn't support (see that function's own docstring for the full test).
+
 Usage:
     uv run scripts/build_weekly_projections.py --week 2
     uv run scripts/build_weekly_projections.py --week 1 --board-csv path/to/prekickoff_board.csv \
@@ -37,7 +46,18 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from ffmodel.features import compute_routes_run
-from ffmodel.season import build_enriched_weekly, build_weekly_matchups, compute_defense_strength, project_weekly_points
+from ffmodel.season import (
+    aggregate_healthy_season_stats,
+    aggregate_season_stats,
+    build_enriched_weekly,
+    build_season_training_table,
+    build_weekly_matchups,
+    compute_defense_strength,
+    compute_strength_of_schedule,
+    compute_weekly_walk_forward_residuals,
+    project_weekly_points,
+    simulate_weekly_outcomes,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 RAW_DIR = ROOT / "data" / "raw"
@@ -61,6 +81,7 @@ def main() -> None:
              "and as-of when) - always fill this in so a future session knows how trustworthy the "
              "snapshot is.",
     )
+    parser.add_argument("--n-sims", type=int, default=10000)
     args = parser.parse_args()
 
     weekly = pd.read_parquet(RAW_DIR / "weekly_stats.parquet")
@@ -68,6 +89,11 @@ def main() -> None:
     participation = pd.read_parquet(RAW_DIR / "participation.parquet")
     ngs = pd.read_parquet(RAW_DIR / "nextgen_receiving.parquet")
     schedules = pd.read_parquet(RAW_DIR / "schedules.parquet")
+    rosters = pd.read_parquet(RAW_DIR / "rosters.parquet")
+    snap_share = pd.read_parquet(RAW_DIR / "snap_share.parquet")
+    contract_history = pd.read_parquet(RAW_DIR / "contract_history.parquet")
+    injuries = pd.read_parquet(RAW_DIR / "injuries.parquet")
+    ecr_history = pd.read_parquet(RAW_DIR / "market_ecr_history.parquet")
     routes = compute_routes_run(pbp, participation, weekly)
     weekly_matchups = build_weekly_matchups(schedules, args.season)
 
@@ -87,6 +113,18 @@ def main() -> None:
             board.dropna(subset=["player_id"])[["player_id", "player_display_name", "position", "team", "vbd"]],
             on="player_id", how="left",
         )
+
+        print(f"{scoring}: building weekly residual pool for the Monte Carlo sim (walk-forward, 2019-2026)...")
+        season_stats = aggregate_season_stats(enriched)
+        healthy_season_stats = aggregate_healthy_season_stats(enriched, injuries)
+        sos = compute_strength_of_schedule(schedules, defense_strength)
+        training_table = build_season_training_table(
+            season_stats, rosters, schedules, snap_share, contract_history, sos, ecr_history, healthy_season_stats
+        )
+        weekly_residuals = compute_weekly_walk_forward_residuals(training_table, enriched, defense_strength)
+        sim = simulate_weekly_outcomes(week_board, weekly_residuals, n_sims=args.n_sims)
+        week_board = week_board.merge(sim, on="player_id", how="left")
+
         week_board = week_board.sort_values("weekly_points_pred", ascending=False).round(2)
         week_board["season"] = args.season
         week_board["scoring"] = scoring
@@ -96,7 +134,9 @@ def main() -> None:
 
         cols = [
             "season", "week", "player_id", "player_display_name", "position", "team", "opponent",
-            "is_bye", "matchup_factor", "weekly_points_pred", "scoring", "locked_at", "source_note", "source_board",
+            "is_bye", "matchup_factor", "weekly_points_pred",
+            "sim_p10", "sim_p25", "sim_median", "sim_p75", "sim_p90", "sim_bust_prob", "sim_boom_prob",
+            "scoring", "locked_at", "source_note", "source_board",
         ]
         out_path = LOCK_DIR / f"week{args.week}_{args.season}_{scoring}.csv"
         week_board[cols].to_csv(out_path, index=False)

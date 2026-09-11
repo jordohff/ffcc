@@ -5010,3 +5010,71 @@ deterministic 0). Worth checking whether the residual distribution should be con
 or `games_est` bucket (does a tougher matchup or a less secure role also mean more VARIANCE, not just a lower
 mean) before shipping - not tested yet, flagged as the next real step if the user wants to proceed.
 
+
+
+### 2026-09-11 (cont'd) - weekly Monte Carlo shipped; matchup-difficulty research (snap share, personnel
+packages) tested and found not to add anything real
+
+User asked to build the weekly Monte Carlo sim, specifically requesting real research into matchup
+difficulty first: how it affects snap share by team, and what defenses struggle against specific personnel
+packages, by position. Investigated each as a real, separate hypothesis before building anything - three of
+four tested ideas came back clean, honest nulls; the fourth (weekly sim itself) shipped.
+
+**Personnel-package defense weakness - real persistence, but decisively rejected on incremental value.**
+Pulled nflreadpy's full `load_participation()` schema (2018-2025, not the reduced 3-column version this
+project caches - `offense_personnel`/`defense_personnel`/`defenders_in_box`/coverage-type are all real,
+available fields never pulled before). Parsed real personnel groupings (11/12/21/etc from RB/TE/WR counts).
+Same-game correlation between opponent's personnel mix and points allowed is real but LARGELY MECHANICAL
+(WR points allowed correlates with opponent's own 11-personnel rate, r=0.149, p<0.0001 - but that's mostly
+just "an offense using more 3-WR sets naturally produces more WR opportunity," not a defensive weakness).
+Isolated the DEFENSE-SPECIFIC signal properly: regressed points-allowed on the population-level personnel-mix
+effect, took residuals, and found real year-over-year persistence for a defense's OWN personnel-specific
+residual (WR-vs-11-personnel r=0.216 p=0.0012; RB-vs-21-personnel r=0.294 p<0.0001, n=222 team-seasons) -
+a real, stable, replicable pattern on its own. **But the decisive test - does it add anything BEYOND the
+already-existing `defense_strength`/`matchup_factor`? - came back a clean, honest null**: correlating the
+personnel-specific residual with the EXISTING model's own prediction residual gave r=0.020 (WR) and r=-0.006
+(RB), both statistically indistinguishable from zero, and adding it to the model moved MAE by less than
+0.02 points either direction. A defense that looks personnel-specific-weak, once you dig in, is just a
+defense that's generally weak against that position - matchup_factor already knows this. Not shipped -
+matches this project's repeated finding (O-line quality, team TE target share, incoming competition) that a
+real, even statistically persistent signal can still be fully redundant with what's already in the model.
+
+**Matchup difficulty -> snap-share reallocation - clean null, no game-script effect detected.** Tested
+whether a tougher matchup at a position (lower matchup_factor) predicts real team-level snap-share shifts
+that game (real snap_share.parquet data, REG season, 2013-2025) - both same-position ("does a tough RB
+matchup reduce RB snap share") and cross-position spillover ("does it shift snaps toward WR/TE instead").
+Every correlation came back negligible: |r| < 0.05 in all 9 combinations tested (RB/WR/TE snap share vs.
+RB/WR/TE matchup_factor), several technically "significant" only because of the large sample size (n~6500+)
+inflating power, not because of a real effect size. Real NFL teams do not appear to meaningfully change their
+RB/WR/TE personnel usage in direct response to pre-game matchup difficulty at this level of analysis - not
+shipped, a genuine null result.
+
+**Matchup difficulty -> weekly VARIANCE (the one that actually determines the sim's design) - also a clean
+null, which simplified the build.** Bucketed real single-week residuals (2019-2025 walk-forward, same pool
+used for the bias fix earlier this session) into matchup_factor quartiles and compared std within each
+bucket, by position: QB 7.95-8.45, RB 6.31-6.81, WR 5.70-6.11, TE 4.47-4.85 - noise-level spread across
+quartiles at every position, and if anything the EASIEST-matchup quartile trends slightly HIGHER variance
+than the toughest (not the intuitive direction, but a small enough effect it's not worth chasing). Confirmed
+with a second cut: correlating matchup extremity (|matchup_factor - 1|) against absolute residual gives
+r=0.02-0.05 across positions - real but tiny. Conclusion: the weekly sim's residual pool only needs to be
+conditioned on POSITION, not matchup difficulty - a much simpler design than initially planned, and one the
+data actually supports rather than one assumed for "more realism."
+
+**Shipped: `compute_weekly_walk_forward_residuals` + `simulate_weekly_outcomes`** (season.py) - the weekly
+analog of the season-level Monte Carlo, using a SEPARATE residual pool (real single-week actual-minus-
+predicted errors, not the season-level pool, since a season average smooths out variance a single week
+doesn't have). 10k draws per player-week, reports p10/p25/median/p75/p90 plus sim_bust_prob (P(sim < 3.0
+points) - a low, fixed "did this contribute anything" bar, since a replacement-level concept doesn't
+translate cleanly to one week) and sim_boom_prob (P(sim >= that week's own top-10 average at the position),
+matching the season sim's dynamic-bar convention). A bye or definite-out week (already zeroed by
+project_weekly_points) isn't simulated - deterministic 0, no real variance question left once we know
+they're not playing. Wired into `build_weekly_projections.py` (computes the residual pool once per scoring
+format per lock run) and the artifact's Weekly Rankings page (click any row for the same box-plot UI already
+used on the draft board - reused directly, not reimplemented). Re-locked Week 1 with the sim included;
+verified Jalen Hurts (top overall week 1) shows a sensible p10=14.97/median=24.84/p90=36.38, 73% boom prob.
+
+Net: one real, validated feature shipped (the weekly sim itself, deliberately simple - position-only pooling,
+no matchup conditioning, because the data didn't support anything fancier), three real, honestly-tested
+hypotheses rejected with evidence rather than assumed either way. All four investigations used real
+historical data before any code was written, matching this project's standing discipline throughout.
+

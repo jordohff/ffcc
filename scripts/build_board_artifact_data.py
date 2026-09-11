@@ -136,6 +136,7 @@ def build_replacement_constants(scoring: str) -> dict:
 WEEKLY_COLS = [
     "week", "player_id", "player_display_name", "position", "team", "opponent",
     "is_bye", "matchup_factor", "weekly_points_pred",
+    "sim_p10", "sim_p25", "sim_median", "sim_p75", "sim_p90", "sim_bust_prob", "sim_boom_prob",
 ]
 
 
@@ -156,6 +157,12 @@ def build_weekly(scoring: str) -> tuple[list[dict], list[dict]]:
         wk = pd.read_csv(path)
         if wk.empty:
             continue
+        # An older lock (before the weekly Monte Carlo sim shipped) won't have
+        # the sim_* columns - fill with null rather than erroring, so a mixed
+        # set of old/new locked weeks still loads cleanly.
+        for col in WEEKLY_COLS:
+            if col not in wk.columns:
+                wk[col] = None
         rows.extend(json.loads(wk[WEEKLY_COLS].to_json(orient="records")))
         meta.append({
             "week": int(wk["week"].iloc[0]),
