@@ -5238,3 +5238,49 @@ zeroing behavior, and removed the now-unused `.week-note` CSS rule. Verified via
 updated for the new default-page assertions) and a real-browser check (footer note renders correctly at the
 bottom, Weekly Rankings loads by default) before publishing.
 
+### 2026-09-16 - first real routine failure: Sleeper API blocked in the cloud sandbox; Week 2 locked
+manually; a committed fallback snapshot fixes it for future weeks
+
+The Tuesday (9/15) scheduled routine fired on time and got through steps 1-2 before hitting a real,
+confirmed blocker: `fetch_sleeper_players()` → `api.sleeper.app` returned a 403 from the sandbox's own
+egress proxy (`"kind": "connect_rejected", "detail": "gateway answered 403 to CONNECT (policy denial or
+upstream failure)"`). The proxy's own README is explicit that this class of denial should be reported, not
+retried or routed around - the routine correctly did that (no retry, no partial commit/publish) and sent a
+push notification rather than publishing something broken. Confirmed via `RemoteTrigger action:"get_run_log"`
+that every OTHER source (all nflreadpy/nflverse-backed - injuries.parquet pulled fine, 85,931 rows,
+immediately before the Sleeper call) works from that same sandbox - this is specific to Sleeper's own API
+host, not a general network outage.
+
+**No data was actually lost**: Week 2 games don't start until 9/17, so a same-day manual run (this session's
+own unrestricted network access) still produced a genuine pre-kickoff snapshot. Ran the full manual workflow
+(refresh live data, rebuild both boards - backtest normal range at every position - real-news check, lock
+week 2, splice+publish the artifact, commit+push). Real-news check found Sam Darnold (SEA, Out) and A.J.
+Brown (NE, IR) already correctly reflected via `current_injury_status` (auto-zeroed for the week via the
+existing `WEEKLY_DEFINITE_OUT_STATUSES` check, no manual override needed) and Jordan Love (GB) as only
+Questionable (left alone, matching the project's standing "don't act on soft signals" rule). One search
+result initially conflated Christian McCaffrey's 2024 Achilles/calf IR stint with 2026 - a second, more
+specific search correctly ruled this out; he's healthy for 2026.
+
+**Root-caused whether this was fixable and, since no environment-network-policy tool is exposed to fix it
+directly, made the PIPELINE resilient instead of leaving the weekly routine dependent on a human catch every
+time.** Added a committed (not gitignored) fallback snapshot, `data/fallback/sleeper_players_snapshot.parquet`
+(see that directory's own README) - `scripts/pull_data.py`'s new `_pull_sleeper_players` tries the live API
+first and, only on a `requests.exceptions.RequestException`, falls back to copying this snapshot instead of
+crashing the whole pipeline (previously a hard, unguarded dependency with no fallback at all - the same
+failure mode already documented once before, in the 2026-09-15 routine run, as "no fallback, hard stop").
+Every SUCCESSFUL live pull also refreshes the committed snapshot, so it self-maintains at "as fresh as the
+last time someone with real network access ran this" without a dedicated upkeep step. Verified both paths
+directly: a real `--force` pull (fresh sleeper_players.parquet, 12,227 rows, fallback snapshot refreshed to
+match) and a simulated failure (monkeypatched `fetch_sleeper_players` to raise `ConnectionError`, confirmed
+it falls back to the committed snapshot rather than raising).
+
+**Known, accepted limitation of the fallback path specifically** (not the nflverse-backed sources, which
+always pull live and fresh regardless): if the cloud routine ever has to use the fallback, `current_injury_
+status` (Sleeper-only - no other source in this pipeline carries it) and the Sleeper-preferred `team`
+override will be however stale the last human refresh left them, for that one run. The routine's own Step 5
+(a small, targeted real-news web search) is the intended safety net for exactly this gap - already designed
+to independently verify and apply `MANUAL_WEEKLY_OUT`/`MANUAL_STATUS_OVERRIDES` regardless of what the
+structured data shows. Given this session runs `pull_data.py` with real network access reasonably often, the
+fallback should rarely be more than a few days stale in practice - worth revisiting only if the sandbox's
+policy is ever found to have started blocking other hosts this pipeline depends on too.
+
