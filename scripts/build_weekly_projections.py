@@ -91,6 +91,14 @@ MANUAL_WEEKLY_OUT: dict[tuple[str, int], str] = {
     ("00-0039338", 1): "Brock Bowers (LV TE) - meniscus trim 9/9/26, officially listed as a non-"
     "participant on LV's Week 1 injury report, expected to miss the LV@MIA game 9/13. Not yet "
     "reflected in Sleeper's live feed as of lock time (2026-09-11).",
+    ("00-0039910", 3): "Jayden Daniels (WAS QB) - dislocated left elbow vs. Dallas in Week 2 (same "
+    "joint as last season's injury), officially ruled out for Week 3 vs. Seattle - Marcus Mariota "
+    "confirmed starting (CBS Sports/NFL.com/Bleacher Report, 2026-09-21/22). Longer-term outlook "
+    "still uncertain per the team, so only this week is overridden, not a season-long change.",
+    ("00-0033885", 3): "David Njoku (LAC TE) - placed on injured reserve after a fibula injury in "
+    "the Week 2 loss to Las Vegas, will miss at least 4 games (ESPN/Chargers.com, 2026-09-21/22).",
+    ("00-0038046", 3): "Charlie Kolar (LAC TE) - placed on injured reserve after a forearm injury "
+    "in the Week 2 loss to Las Vegas, will miss at least 4 games (ESPN/Chargers.com, 2026-09-21/22).",
 }
 
 
