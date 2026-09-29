@@ -3729,6 +3729,29 @@ MANUAL_STATUS_OVERRIDES: dict[str, dict] = {
         "note": "Torn ACL in 8/26/26 joint practice, out for the 2026 season (ESPN/NFL Network). "
         "Manual override: real, confirmed absence for the entire 2026 season.",
     },
+    # De'Von Achane (MIA RB) - torn ACL suffered in Week 3 (9/27/26 loss to
+    # KC), placed on IR 9/29/26, confirmed out for the rest of the 2026
+    # season per ESPN (Adam Schefter), NFL Network (Ian Rapoport), CBS
+    # Sports, and NFL.com - unambiguous, multi-source, verified 2026-09-29.
+    # Board still showed a normal games_est (12.79) and `status == "ACT"`
+    # since the roster/injury-report pulls hadn't yet caught up to a move
+    # that happened the same day this routine ran.
+    "00-0039040": {
+        "games_est": 0.0,
+        "note": "Torn ACL in Week 3 (9/27/26 vs KC), placed on IR 9/29/26 - out for the 2026 season "
+        "(ESPN/NFL Network/CBS/NFL.com). Manual override: real, confirmed absence for the entire 2026 season.",
+    },
+    # Josh Oliver (MIN TE) - torn biceps, confirmed by the Vikings following
+    # their Week 3 (9/27/26) win over Tampa Bay, MRI-confirmed 9/28/26,
+    # moving to IR - reported "likely done for season" by RotoWire/CBS
+    # Sports/NBC Sports, with only an outside chance of a playoff-only
+    # return the Vikings' regular season doesn't affect for this project's
+    # (non-playoff-scoring) leagues. Verified 2026-09-29.
+    "00-0035249": {
+        "games_est": 0.0,
+        "note": "Torn biceps, confirmed by team 9/28/26, moving to IR - likely done for the 2026 season "
+        "(RotoWire/CBS/NBC Sports). Manual override: real, confirmed absence for the remainder of the season.",
+    },
 }
 """Hand-maintained, dated overrides for real-world events that broke too
 recently for any of this project's periodic data pulls to reflect yet

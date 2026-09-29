@@ -99,6 +99,11 @@ MANUAL_WEEKLY_OUT: dict[tuple[str, int], str] = {
     "the Week 2 loss to Las Vegas, will miss at least 4 games (ESPN/Chargers.com, 2026-09-21/22).",
     ("00-0038046", 3): "Charlie Kolar (LAC TE) - placed on injured reserve after a forearm injury "
     "in the Week 2 loss to Las Vegas, will miss at least 4 games (ESPN/Chargers.com, 2026-09-21/22).",
+    ("00-0034855", 4): "Baker Mayfield (TB QB) - dislocated right thumb (throwing hand) late in the "
+    "Week 3 loss to Minnesota (9/27/26), officially ruled out for Week 4 vs. Green Bay per HC Todd "
+    "Bowles (out ~3 weeks total, no surgery needed) - Yahoo Sports/ESPN/Buccaneers.com/NBC Sports, "
+    "2026-09-28/29. Rookie Jalon Daniels expected to start. Short-term (this week only), not "
+    "season-long, so overridden here rather than in MANUAL_STATUS_OVERRIDES.",
 }
 
 
