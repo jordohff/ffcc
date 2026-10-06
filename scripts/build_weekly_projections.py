@@ -104,6 +104,23 @@ MANUAL_WEEKLY_OUT: dict[tuple[str, int], str] = {
     "Bowles (out ~3 weeks total, no surgery needed) - Yahoo Sports/ESPN/Buccaneers.com/NBC Sports, "
     "2026-09-28/29. Rookie Jalon Daniels expected to start. Short-term (this week only), not "
     "season-long, so overridden here rather than in MANUAL_STATUS_OVERRIDES.",
+    ("00-0034855", 5): "Baker Mayfield (TB QB) - same thumb injury, still out (3-6 week recovery "
+    "per ESPN/Adam Schefter), officially a non-participant on TB's Week 5 injury report ahead of "
+    "the Thursday 10/8/26 game at Dallas (Buccaneers.com, 2026-10-05). Jalon Daniels expected to "
+    "start again. Not yet reflected in Sleeper's live feed as of lock time (2026-10-06).",
+    ("00-0039918", 5): "Caleb Williams (CHI QB) - Grade 2 right hamstring strain suffered 9/20/26 "
+    "vs. Minnesota, officially ruled out for Week 5 vs. Green Bay - HC Ben Johnson confirmed he "
+    "won't practice this week and is still week-to-week, not day-to-day (RotoWire/NBC Sports/CBS "
+    "Sports, 2026-10-05). Tyson Bagent to make his second straight start. Short-term, not "
+    "season-long - a Week 6 return is possible per the team.",
+    ("00-0033885", 5): "David Njoku (LAC TE) - fibula injury, placed on IR after Week 2 with a "
+    "stated 'at least 4 games' absence (ESPN/Chargers.com, 2026-09-21/22) - that window runs "
+    "through Week 5 (games 3-6). Extending the already-sourced timeline rather than a new report; "
+    "re-verify once Sleeper's live feed (currently stale, see data/fallback/README) catches up.",
+    ("00-0038046", 5): "Charlie Kolar (LAC TE) - forearm injury, placed on IR after Week 2 with the "
+    "same stated 'at least 4 games' absence (ESPN/Chargers.com, 2026-09-21/22), running through "
+    "Week 5. Extending the already-sourced timeline, not a new report - re-verify once Sleeper's "
+    "live feed catches up.",
 }
 
 
