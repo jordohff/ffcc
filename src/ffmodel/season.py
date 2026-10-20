@@ -3687,23 +3687,32 @@ precisely because so few remain useful past the top of the position).
 
 MANUAL_STATUS_OVERRIDES: dict[str, dict] = {
     # Josh Jacobs (GB RB) - placed on the NFL Commissioner's Exempt List
-    # 8/30/26, facing misdemeanor battery/criminal-damage charges, barred
-    # from all team facility access except individual workouts, no return
-    # timeline (per ESPN/NFL.com, same day). None of this project's data
-    # sources (nflverse roster status, Sleeper injury status, depth chart)
-    # reflect this yet - a same-day event like this always outruns a
-    # periodic data pull. games_est set to a conservative low placeholder
-    # (not 0 - a mid/late-season return if the case resolves quickly isn't
-    # impossible) rather than fabricated from any real base rate, since this
-    # project has no comparable historical cases to calibrate against (a
-    # genuinely different situation from every other durability correction
-    # in this pipeline, all of which ARE calibrated on real precedent).
-    # Remove this entry once a real data source (roster status, injury
-    # report) catches up and reflects it structurally instead.
+    # 8/30/26 (pending misdemeanor battery/criminal-damage charges), missed
+    # the Packers' first 6 games. UPDATE 2026-10-20: multi-source reporting
+    # (Yahoo Sports, ESPN, FOX Sports, CBS Sports) confirms he was removed
+    # from the exempt list 10/19/26 and is eligible to play Week 7 at
+    # Detroit (10/25) - CBS Sports explicitly: "cleared to play, workload
+    # uncertain." The league's personal-conduct review remains open
+    # separately and could still add discipline later, but the thing this
+    # override exists to capture (a hard, dateless bar on returning at all)
+    # has resolved. games_est raised from the original 2.0 placeholder to a
+    # still-conservative 9.0 (of ~11 team games remaining from Week 7
+    # through Week 18, GB's bye already passed in Week 11) - deliberately
+    # below the max, since his exact role after a 6-game layoff and the
+    # team's own "haven't determined this week" framing are both genuinely
+    # uncertain, and this project has no comparable precedent to calibrate
+    # a tighter number against. His own ppg_pred already reflects a
+    # depressed current depth-chart rank from the layoff, left alone here
+    # (a separate, real signal, not something this override should also
+    # try to correct). Remove this entry once a real data source
+    # (roster/depth-chart status) catches up and reflects his reinstatement
+    # structurally instead.
     "00-0035700": {
-        "games_est": 2.0,
-        "note": "Placed on NFL Commissioner's Exempt List 8/30/26 (pending misdemeanor charges) - "
-        "barred from team activity, no return timeline. Manual override, not calibrated to precedent.",
+        "games_est": 9.0,
+        "note": "Removed from the NFL Commissioner's Exempt List 10/19/26, eligible to play Week 7 "
+        "at Detroit 10/25 (Yahoo/ESPN/FOX/CBS Sports) - CBS: \"cleared to play, workload uncertain.\" "
+        "Conduct review still open separately. Manual override, games_est conservative, not "
+        "calibrated to precedent.",
     },
     # Ricky Pearsall (SF WR) and Jayden Higgins (HOU WR) - both confirmed,
     # unambiguous SEASON-ENDING injuries (Pearsall: PCL surgery, placed on
