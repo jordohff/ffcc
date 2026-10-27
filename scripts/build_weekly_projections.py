@@ -123,6 +123,23 @@ MANUAL_WEEKLY_OUT: dict[tuple[str, int], str] = {
     "live feed catches up.",
 }
 
+# Opposite direction from MANUAL_WEEKLY_OUT: clears a FALSE current_injury_status
+# "Out"/etc. tag for one specific (player_id, week) that's actually stale, not a
+# real current absence. Root cause (verified 2026-10-27): the cloud routine's
+# sandbox cannot reach api.sleeper.app (see data/fallback/README) and has been
+# falling back to a committed Sleeper snapshot that is now ~6 weeks stale
+# (last refreshed 2026-09-16 - no human session since has had a successful live
+# Sleeper pull to refresh it). This makes current_injury_status itself stale for
+# any player whose status changed since then, in EITHER direction.
+MANUAL_WEEKLY_CLEAR_OUT: dict[tuple[str, int], str] = {
+    ("00-0034869", 8): "Sam Darnold (SEA QB) - board shows a stale 'Out' from his Week 1 (9/9/26) "
+    "hip injury vs. New England. Confirmed via multi-source web search he has played every game "
+    "since: a full Week 6 outing at Denver (27-of-51 passing, box score) and FOX Sports (10/18/26) "
+    "reporting Seattle is sticking with him as the Week 7 starter vs. KC. games_est (14.70) already "
+    "reflects a healthy near-full-season workload - the stale 'Out' tag was the only thing that "
+    "would have zeroed his Week 8 projection. Clearing it for Week 8 only, not a season-long change.",
+}
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -208,6 +225,14 @@ def main() -> None:
             if mask.any():
                 board.loc[mask, "current_injury_status"] = "Out"
                 print(f"{scoring}: applied manual weekly-out for {player_id} (week {wk}): {note}")
+
+        for (player_id, wk), note in MANUAL_WEEKLY_CLEAR_OUT.items():
+            if wk != args.week:
+                continue
+            mask = board["player_id"] == player_id
+            if mask.any():
+                board.loc[mask, "current_injury_status"] = None
+                print(f"{scoring}: cleared stale weekly-out flag for {player_id} (week {wk}): {note}")
 
         enriched = build_enriched_weekly(weekly, routes, ngs, scoring=scoring)
         defense_strength = compute_defense_strength(enriched)
