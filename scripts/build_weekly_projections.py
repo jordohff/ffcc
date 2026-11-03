@@ -138,6 +138,13 @@ MANUAL_WEEKLY_CLEAR_OUT: dict[tuple[str, int], str] = {
     "reporting Seattle is sticking with him as the Week 7 starter vs. KC. games_est (14.70) already "
     "reflects a healthy near-full-season workload - the stale 'Out' tag was the only thing that "
     "would have zeroed his Week 8 projection. Clearing it for Week 8 only, not a season-long change.",
+    ("00-0034869", 9): "Sam Darnold (SEA QB) - same stale Week 1 'Out' tag, still showing in the "
+    "Sleeper fallback snapshot (last refreshed 2026-09-16, see data/fallback/README.md). "
+    "Re-verified 2026-11-03: NFL.com reported him off the injury report and starting vs. "
+    "Washington shortly after Week 1; FOX Sports (10/18/26) and CBS Sports both report HC Mike "
+    "Macdonald reaffirming Darnold as the starter, with coverage framed around performance, not "
+    "injury. No report of any new injury or benching found. games_est (14.70) already reflects a "
+    "healthy near-full-season workload - clearing the stale tag for Week 9 only.",
 }
 
 
