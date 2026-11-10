@@ -121,6 +121,14 @@ MANUAL_WEEKLY_OUT: dict[tuple[str, int], str] = {
     "same stated 'at least 4 games' absence (ESPN/Chargers.com, 2026-09-21/22), running through "
     "Week 5. Extending the already-sourced timeline, not a new report - re-verify once Sleeper's "
     "live feed catches up.",
+    ("00-0041027", 10): "Jeremiyah Love (ARI RB) - high-ankle sprain suffered in the Week 8 win "
+    "over Dallas, placed on injured reserve ~11/3/26, out at least 4 games per Ian Rapoport/NFL "
+    "Network (AP/TSN/4for4/ClutchPoints, 2026-11-03/04) - not eligible to return before Week 13, "
+    "with reporting suggesting the Cardinals will likely wait until after their Week 14 bye. Board "
+    "already shows status == RES (nflverse roster pull caught the move) but games_est (15.0) and "
+    "current_injury_status (NaN - stale Sleeper fallback, see data/fallback/README) don't reflect "
+    "it. Short-term, not season-long (he is expected back this year) - overridden here rather than "
+    "in MANUAL_STATUS_OVERRIDES.",
 }
 
 # Opposite direction from MANUAL_WEEKLY_OUT: clears a FALSE current_injury_status

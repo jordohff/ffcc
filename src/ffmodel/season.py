@@ -3761,6 +3761,37 @@ MANUAL_STATUS_OVERRIDES: dict[str, dict] = {
         "note": "Torn biceps, confirmed by team 9/28/26, moving to IR - likely done for the 2026 season "
         "(RotoWire/CBS/NBC Sports). Manual override: real, confirmed absence for the remainder of the season.",
     },
+    # Jalen Hurts (PHI QB) - diagnosed with deep vein thrombosis and
+    # bilateral pulmonary emboli (blood clots), out for the rest of the
+    # 2026 season per the Eagles/ESPN (multi-source: Fox Sports via ESPN,
+    # Sky Sports, Saturday Down South, CBS News), ~Week 5/October 2026.
+    # Tanner McKee is PHI's starting QB for the rest of the season. Board
+    # already shows `status == "RES"`, but `current_injury_status` is NaN
+    # (stale Sleeper fallback data as of this 2026-11-10 run - the live
+    # Sleeper API pull failed with a proxy 403 and fell back to the last
+    # committed snapshot) and the GBM durability model still had him at a
+    # nonzero games_est (5.0) with no awareness of the real, confirmed,
+    # season-long absence. Verified 2026-11-10.
+    "00-0036389": {
+        "games_est": 0.0,
+        "note": "Diagnosed with blood clots (DVT/pulmonary emboli), out for the rest of the 2026 season "
+        "(ESPN/Fox Sports/Sky Sports) - Tanner McKee is PHI's starter. Manual override: real, "
+        "confirmed absence for the remainder of the season.",
+    },
+    # Terry McLaurin (WAS WR) - torn left patellar tendon suffered in a
+    # Week 9 (10/19/26 MNF) loss to SF, confirmed out for the rest of the
+    # 2026 season by HC Dan Quinn 10/20/26 - multi-source (CBS News, WJLA,
+    # TSN, 4for4, Newsweek, SI), will undergo surgery. Board already shows
+    # `status == "RES"`, but `current_injury_status` is NaN (stale Sleeper
+    # fallback - see the Hurts entry above for why) and games_est was still
+    # a normal 13.04 with no awareness of the confirmed season-ending
+    # injury. Verified 2026-11-10.
+    "00-0035659": {
+        "games_est": 0.0,
+        "note": "Torn left patellar tendon (Week 9, 10/19/26), out for the rest of the 2026 season - "
+        "confirmed by HC Dan Quinn 10/20/26 (CBS News/WJLA/TSN), will have surgery. Manual override: "
+        "real, confirmed absence for the remainder of the season.",
+    },
 }
 """Hand-maintained, dated overrides for real-world events that broke too
 recently for any of this project's periodic data pulls to reflect yet
